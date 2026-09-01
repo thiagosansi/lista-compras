@@ -1,36 +1,41 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Lista de Compras
 
-## Getting Started
+PWA mobile-first de lista de compras compartilhada (fase 1). Veja `SPEC.md` para o contrato técnico e o roadmap.
 
-First, run the development server:
+## Rodar localmente
+
+1. Crie um projeto no Supabase e aplique `supabase/migrations/0001_init.sql` (SQL Editor do dashboard ou `supabase db push`).
+2. Copie `.env.example` para `.env.local` e preencha a URL e a publishable key do projeto (Settings → API).
+3. Instale e rode:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Abra no celular pelo IP da máquina na mesma rede (ex.: `http://192.168.0.10:3000`). O service worker fica desligado em dev.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Deploy (Vercel)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+vercel link
+vercel env add NEXT_PUBLIC_SUPABASE_URL
+vercel env add NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+vercel --prod
+```
 
-## Learn More
+Depois, no Supabase em Authentication → URL Configuration, adicione a URL de produção em "Site URL" e "Redirect URLs".
 
-To learn more about Next.js, take a look at the following resources:
+## Fluxo de uso
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Cada pessoa cria uma conta em `/login`.
+2. Uma cria a "casa" e compartilha o código de 6 letras. A outra entra com o código.
+3. A lista em `/lista` sincroniza em tempo real entre os dois.
+4. No celular, instale como app: Android mostra o banner "Instalar"; no iPhone use Compartilhar → Adicionar à Tela de Início.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Roadmap
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Fase 2: leitura do QR da NFC-e para histórico de preços por loja.
+- Fase 3: integração com Preço da Hora (BA), com cache.
+- Fase 4: foto de encarte → promoções estruturadas.
+- Fase 5: recomendação de loja única vs. divisão de compras.
