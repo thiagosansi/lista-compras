@@ -261,6 +261,10 @@ grant execute on function public.join_household(text) to authenticated;
 revoke all on function public.generate_invite_code() from public, anon;
 grant execute on function public.generate_invite_code() to authenticated;
 
+-- Funções de trigger não devem ser expostas via /rest/v1/rpc.
+revoke all on function public.handle_new_user() from public, anon, authenticated;
+revoke all on function public.set_list_item_updated_at() from public, anon, authenticated;
+
 -- -----------------------------------------------------------------------------
 -- Grants de tabela (Supabase já tem default privileges, mas explícito é seguro)
 -- -----------------------------------------------------------------------------
