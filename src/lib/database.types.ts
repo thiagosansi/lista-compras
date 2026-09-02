@@ -283,6 +283,45 @@ export type Database = {
         };
         Relationships: [];
       };
+      item_matches: {
+        Row: {
+          id: string;
+          household_id: string;
+          item_key: string;
+          description_key: string;
+          gtin: string | null;
+          is_match: boolean;
+          source: "llm" | "user";
+          reason: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          household_id: string;
+          item_key: string;
+          description_key: string;
+          gtin?: string | null;
+          is_match: boolean;
+          source: "llm" | "user";
+          reason?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          household_id?: string;
+          item_key?: string;
+          description_key?: string;
+          gtin?: string | null;
+          is_match?: boolean;
+          source?: "llm" | "user";
+          reason?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {
@@ -304,7 +343,7 @@ export type Database = {
           gtin: string | null;
           observed_at: string;
           source: PriceSource;
-          match_kind: "gtin" | "product" | "name";
+          match_kind: "gtin" | "product" | "name" | "llm" | "user";
           score: number;
         }[];
       };
@@ -324,6 +363,8 @@ export type Product = Tables<"products">;
 export type Receipt = Tables<"receipts">;
 export type ReceiptItem = Tables<"receipt_items">;
 export type PriceObservation = Tables<"price_observations">;
+export type ItemMatch = Tables<"item_matches">;
+export type MatchKind = BestPriceRow["match_kind"];
 export type BestPriceRow = Database["public"]["Functions"]["best_prices"]["Returns"][number];
 
 /** Formato de resultado do Preço da Hora (contrato de /api/precos/buscar). */
