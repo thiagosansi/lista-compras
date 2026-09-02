@@ -37,7 +37,7 @@ export function AddItemBar({ onAdd, onPick }: AddItemBarProps) {
   const nameRef = useRef<HTMLInputElement>(null);
   const listId = useId();
 
-  const { sugestoes, carregando, fonteExterna } = useProductSuggestions(name);
+  const { sugestoes, carregando, fonteExterna, buscarMais, buscandoMais, avisoBuscarMais } = useProductSuggestions(name);
   const open = !dismissed && name.trim().length >= 3 && sugestoes.length > 0;
   const activeId = open && activeIndex >= 0 && activeIndex < sugestoes.length ? `${listId}-opt-${activeIndex}` : undefined;
 
@@ -138,6 +138,22 @@ export function AddItemBar({ onAdd, onPick }: AddItemBarProps) {
           {carregando || fonteExterna ? (
             <p className="mt-1 px-1 text-[11px] text-zinc-400 dark:text-zinc-500" aria-live="polite">
               {carregando ? "Buscando…" : "Inclui sugestões do Preço da Hora"}
+            </p>
+          ) : null}
+          <div className="mt-1 flex items-center justify-between gap-2 px-1">
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => buscarMais()}
+              disabled={buscandoMais || name.trim().length < 5}
+              className="text-[11px] font-medium text-emerald-700 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-zinc-400 dark:text-emerald-400 dark:disabled:text-zinc-600"
+            >
+              {buscandoMais ? "Buscando…" : "Buscar mais produtos"}
+            </button>
+          </div>
+          {avisoBuscarMais ? (
+            <p className="mt-0.5 px-1 text-[11px] text-amber-600 dark:text-amber-400" aria-live="polite">
+              {avisoBuscarMais}
             </p>
           ) : null}
         </div>

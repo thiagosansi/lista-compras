@@ -1,6 +1,7 @@
 // GET /api/produtos/[gtin]?storeId= — consulta de produto por código de barras (modo Compras, fase 5).
-// Procura em `products`; se não existir, busca no Preço da Hora por GTIN (raio 30 km, 30 dias), cria o produto com a
-// descrição do primeiro resultado e grava as observações como `precodahora`. `precoSugerido` = observação mais recente
+// Procura em `products`; se não existir, ou se existir mas não houver nenhuma observação de preço para o gtin
+// (household), busca no Preço da Hora por GTIN (raio 30 km, 72h), cria/atualiza o produto com a descrição
+// do primeiro resultado e grava as observações como `precodahora`. `precoSugerido` = observação mais recente
 // (na loja informada, se houver; senão em qualquer loja). Resposta `{ ok: true, ...ProductLookup }`.
 
 import type { ProductLookup } from "@/lib/database.types";
@@ -13,6 +14,7 @@ import {
   recordPdhObservations,
   suggestedPrice,
   upsertProductsByGtin,
+  type Db,
   type ProductLite,
 } from "@/lib/products/server";
 
@@ -28,6 +30,13 @@ function fail(error: string, status: number) {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Existe alguma `price_observations` (qualquer household visível via RLS) para o gtin? */
+async function hasAnyObservation(db: Db, gtin: string): Promise<boolean> {
+  const { data, error } = await db.from("price_observations").select("id").eq("gtin", gtin).limit(1);
+  if (error) throw new Error(`price_observations select: ${error.message}`);
+  return (data?.length ?? 0) > 0;
 }
 
 export async function GET(request: Request, { params }: { params: Promise<{ gtin: string }> }) {
@@ -61,21 +70,37 @@ export async function GET(request: Request, { params }: { params: Promise<{ gtin
   }
 
   let aviso: string | undefined;
-  if (!product) {
+
+  // Consultamos o Preço da Hora quando o produto não existe, ou quando existe mas nunca houve
+  // observação de preço para o gtin (ex.: veio do autocomplete, sem histórico de compra/PDH).
+  let needsPdhLookup = !product;
+  if (product) {
+    try {
+      needsPdhLookup = !(await hasAnyObservation(supabase, gtin));
+    } catch (err) {
+      console.warn("[api/produtos/[gtin]] checagem de observações:", errMsg(err));
+    }
+  }
+
+  if (needsPdhLookup) {
     try {
       const resultados = await searchPrecoDaHora({
         gtin,
         lat: household.lat ?? SALVADOR_CENTRO.lat,
         lng: household.lng ?? SALVADOR_CENTRO.lng,
         raioKm: 30,
-        horas: 720,
+        // 720 (30 dias) é rejeitado pela API real do Preço da Hora ("número de dias/horas inválido(a)!",
+        // codigo 86); 72h é o valor aceito e usado pelos outros dois call sites (precos/buscar, precos/atualizar).
+        horas: 72,
         maxResultados: 25,
       });
       if (resultados.length > 0) {
         // O Preço da Hora pode devolver o gtin sem zero à esquerda; gravamos o pedido (já validado).
         const withGtin = resultados.map((r) => ({ ...r, gtin }));
-        const [created] = await upsertProductsByGtin(supabase, [{ gtin, name: resultados[0].descricao }]);
-        product = created ?? (await findProductByGtin(supabase, gtin));
+        if (!product) {
+          const [created] = await upsertProductsByGtin(supabase, [{ gtin, name: resultados[0].descricao }]);
+          product = created ?? (await findProductByGtin(supabase, gtin));
+        }
         try {
           await recordPdhObservations(supabase, household.id, withGtin);
         } catch (err) {
@@ -85,7 +110,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ gtin
     } catch (err) {
       if (err instanceof PdhError) {
         aviso = err.blocked
-          ? "Preço da Hora limitou as consultas por agora; produto não encontrado no catálogo local."
+          ? product
+            ? "Preço da Hora limitou as consultas por agora; sem preço sugerido no momento."
+            : "Preço da Hora limitou as consultas por agora; produto não encontrado no catálogo local."
           : `Preço da Hora indisponível: ${err.message}`;
       } else {
         console.error("[api/produtos/[gtin]]", err);

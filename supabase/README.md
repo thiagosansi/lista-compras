@@ -7,10 +7,11 @@ As migrations são idempotentes: podem ser aplicadas mais de uma vez sem quebrar
 2. `0002_precos.sql` — Fases 2/3 (histórico de preços). Requer a 0001 já aplicada.
 3. `0003_matches.sql` — Fase 4 (veredictos de correspondência). Requer a 0002 já aplicada.
 4. `0004_compras.sql` — Fase 5 (categorias, sugestões, modo Compras). Requer a 0003 já aplicada.
+5. `0005_products_trgm.sql` — índice trigram em `products.normalized_name` (busca local por `ilike '%palavra%'` no catálogo). Requer a 0002 já aplicada.
 
 ## Aplicar as migrations
 
-**Opção A — Dashboard (mais simples):** abra o projeto no [Supabase Dashboard](https://supabase.com/dashboard) → *SQL Editor* → cole o conteúdo de `migrations/0001_init.sql` → *Run*; repita com `migrations/0002_precos.sql`, `migrations/0003_matches.sql` e `migrations/0004_compras.sql`.
+**Opção A — Dashboard (mais simples):** abra o projeto no [Supabase Dashboard](https://supabase.com/dashboard) → *SQL Editor* → cole o conteúdo de `migrations/0001_init.sql` → *Run*; repita com `migrations/0002_precos.sql`, `migrations/0003_matches.sql`, `migrations/0004_compras.sql` e `migrations/0005_products_trgm.sql`.
 
 **Opção B — CLI:**
 
@@ -46,6 +47,10 @@ Em *Authentication → Providers → Email*:
 - `products.category` e `list_items.category`: texto opcional com *check* contra a lista fixa de `src/lib/categories.ts` (12 valores, repetidos literalmente na migration — se a lista mudar, mude nos dois lugares).
 - `item_categories` (`item_key` = `normalize_name(nome)` → categoria, `source` = `llm`/`user`) e `product_suggestions` (`term_key` → `gtins[]` + `fetched_at`) são caches **globais**, como `products`/`stores`: qualquer autenticado lê/insere/atualiza, ninguém apaga. `item_categories.updated_at` é mantido por trigger.
 - `shopping_sessions` (uma ida ao mercado; índice único parcial garante **uma sessão aberta por household** — `finished_at is null`) e `shopping_session_items` (carrinho; `total` é coluna *generated* `quantity * unit_price`). Trigger `after insert/update/delete` nos itens recalcula `shopping_sessions.total` (num update que troca `session_id`, recalcula as duas sessões). RLS por `is_household_member` (itens via a sessão), CRUD completo.
+
+## Catálogo (migration 0005)
+
+- Índice GIN `products_normalized_name_trgm_idx` em `products.normalized_name` (mesmo padrão de `price_observations_normalized_name_trgm_idx` da 0002), para a busca local por `ilike '%palavra%'` continuar rápida à medida que o catálogo cresce com a semeadura. Não altera RLS, colunas ou outras tabelas.
 
 ## Realtime
 

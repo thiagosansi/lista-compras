@@ -9,8 +9,16 @@ const MIN_LOCAL_CHARS = 3;
 const LOCAL_DEBOUNCE_MS = 250;
 const EXTERNAL_EVERY_N_CHARS = 5;
 const MAX_SUGGESTIONS = 8;
+/** Abaixo disso o catálogo local já não é considerado suficiente: vale a pena consultar a fonte externa. */
+const LOCAL_SUFFICIENT_THRESHOLD = 3;
 
-type SugerirResponse = { ok?: boolean; sugestoes?: ProductSuggestion[]; fonteExterna?: boolean };
+type SugerirResponse = {
+  ok?: boolean;
+  sugestoes?: ProductSuggestion[];
+  fonteExterna?: boolean;
+  aviso?: string;
+  motivo?: string;
+};
 
 /** Termos (palavras normalizadas) do texto; vazio se não houver nada útil. */
 function wordsOf(text: string): string[] {
@@ -32,12 +40,25 @@ function merge(locais: ProductSuggestion[], externas: ProductSuggestion[]): Prod
   return out;
 }
 
+/** União por gtin de duas listas de sugestões externas, preservando a ordem (`a` primeiro). */
+function unionByGtin(a: ProductSuggestion[], b: ProductSuggestion[]): ProductSuggestion[] {
+  const seen = new Set(a.map((s) => s.gtin));
+  const extra = b.filter((s) => s.gtin && !seen.has(s.gtin));
+  return [...a, ...extra];
+}
+
 /**
  * Sugestões de produto para o campo de adicionar.
  * - LOCAL: `products` via client Supabase a partir de 3 caracteres, debounce 250 ms, descarta respostas obsoletas.
- * - EXTERNA: `POST /api/produtos/sugerir` só quando `texto.length` é múltiplo de 5 (espaço conta) e o texto mudou
- *   desde a última consulta. A última resposta fica em memória e é filtrada por palavras enquanto o usuário digita.
- * Nunca lança: falha externa → só local.
+ * - EXTERNA (automática): `POST /api/produtos/sugerir` só quando `texto.length` é múltiplo de 5 (espaço conta), o
+ *   texto mudou desde a última consulta E a busca LOCAL atual (já assentada para esse texto) tem menos de 3
+ *   resultados — regra de suficiência local: com 3+ locais não vale gastar o limite do Preço da Hora. A decisão
+ *   espera a resposta local pendente do mesmo texto; se o usuário continuou digitando enquanto isso, é descartada
+ *   (o efeito reage a `localSettledKey`, então só decide quando os locais estiverem em dia com o texto atual).
+ * - `buscarMais()`: escape manual — chama a rota com `forcarExterno: true` para o texto atual (ignora a regra de
+ *   suficiência) e mescla o resultado às externas já carregadas.
+ * A última resposta externa fica em memória e é filtrada por palavras enquanto o usuário digita entre múltiplos
+ * de 5. Nunca lança: falha externa → só local.
  */
 export function useProductSuggestions(texto: string) {
   const [locais, setLocais] = useState<ProductSuggestion[]>([]);
@@ -45,6 +66,10 @@ export function useProductSuggestions(texto: string) {
   const [fonteExterna, setFonteExterna] = useState(false);
   const [carregandoLocal, setCarregandoLocal] = useState(false);
   const [carregandoExterno, setCarregandoExterno] = useState(false);
+  const [buscandoMais, setBuscandoMais] = useState(false);
+  const [avisoBuscarMais, setAvisoBuscarMais] = useState<string | null>(null);
+  /** Chave local (`chaveLocal`) para a qual `locais` está garantidamente em dia. */
+  const [localSettledKey, setLocalSettledKey] = useState<string>("");
 
   const localSeq = useRef(0);
   const externalSeq = useRef(0);
@@ -64,6 +89,7 @@ export function useProductSuggestions(texto: string) {
         if (seq !== localSeq.current) return;
         setLocais([]);
         setCarregandoLocal(false);
+        setLocalSettledKey(chaveLocal);
       }, 0);
       return () => window.clearTimeout(t);
     }
@@ -89,19 +115,31 @@ export function useProductSuggestions(texto: string) {
       } catch {
         if (seq === localSeq.current) setLocais([]);
       } finally {
-        if (seq === localSeq.current) setCarregandoLocal(false);
+        if (seq === localSeq.current) {
+          setCarregandoLocal(false);
+          setLocalSettledKey(chaveLocal);
+        }
       }
     }, LOCAL_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timer);
   }, [curto, chaveLocal]);
 
-  // Consulta EXTERNA só em múltiplos de 5 caracteres (espaço conta) e quando o texto mudou.
+  // Consulta EXTERNA automática só em múltiplos de 5 caracteres (espaço conta), quando o texto mudou e — regra de
+  // suficiência local — a busca local ATUAL (já assentada, `localSettledKey === chaveLocal`) tem menos de 3
+  // resultados. Se o usuário continuar digitando antes dos locais assentarem, este efeito roda de novo com o
+  // texto novo e a decisão anterior é descartada (nada foi disparado ainda).
   useEffect(() => {
     const len = texto.length;
     if (len < EXTERNAL_EVERY_N_CHARS || len % EXTERNAL_EVERY_N_CHARS !== 0) return;
     if (texto === lastExternalTerm.current) return;
     if (wordsOf(texto).length === 0) return;
+    if (localSettledKey !== chaveLocal) return; // aguarda a busca local do texto atual assentar
+    if (locais.length >= LOCAL_SUFFICIENT_THRESHOLD) {
+      // Catálogo local já basta: não gasta o limite do Preço da Hora. Marca como decidido para este texto exato.
+      lastExternalTerm.current = texto;
+      return;
+    }
     lastExternalTerm.current = texto;
 
     const seq = ++externalSeq.current;
@@ -132,7 +170,7 @@ export function useProductSuggestions(texto: string) {
     })();
 
     return () => controller.abort();
-  }, [texto]);
+  }, [texto, chaveLocal, localSettledKey, locais]);
 
   // Filtra as externas em memória pelas palavras do texto atual.
   const externasFiltradas = useMemo(() => {
@@ -145,9 +183,45 @@ export function useProductSuggestions(texto: string) {
 
   const sugestoes = useMemo(() => (curto ? [] : merge(locais, externasFiltradas)), [curto, locais, externasFiltradas]);
 
+  /** Escape manual: consulta a rota com `forcarExterno: true` para o texto atual e mescla o resultado. */
+  async function buscarMais(): Promise<void> {
+    const atual = termo;
+    if (atual.length < EXTERNAL_EVERY_N_CHARS) return;
+    const seq = ++externalSeq.current;
+    setBuscandoMais(true);
+    setAvisoBuscarMais(null);
+    try {
+      const res = await fetch("/api/produtos/sugerir", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ termo: atual, forcarExterno: true }),
+      });
+      if (seq !== externalSeq.current) return;
+      if (!res.ok) {
+        setAvisoBuscarMais("Não foi possível buscar mais produtos agora.");
+        return;
+      }
+      const json = (await res.json()) as SugerirResponse;
+      if (seq !== externalSeq.current) return;
+      if (json.ok && Array.isArray(json.sugestoes)) {
+        const validas = json.sugestoes.filter((s) => s && typeof s.gtin === "string" && s.gtin.length > 0);
+        setExternas((prev) => unionByGtin(prev, validas));
+        setFonteExterna(Boolean(json.fonteExterna));
+      }
+      if (json.aviso) setAvisoBuscarMais(json.aviso);
+    } catch {
+      if (seq === externalSeq.current) setAvisoBuscarMais("Não foi possível buscar mais produtos agora.");
+    } finally {
+      if (seq === externalSeq.current) setBuscandoMais(false);
+    }
+  }
+
   return {
     sugestoes,
     carregando: !curto && (carregandoLocal || carregandoExterno),
     fonteExterna,
+    buscarMais,
+    buscandoMais,
+    avisoBuscarMais,
   };
 }

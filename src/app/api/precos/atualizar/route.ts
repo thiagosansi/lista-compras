@@ -19,6 +19,7 @@ import {
   type MatchCandidate,
   type SearchPlan,
 } from "@/lib/llm/matching";
+import { parseGtin } from "@/lib/products/server";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -144,6 +145,23 @@ function createLock() {
     );
     return run;
   };
+}
+
+/**
+ * Semeia o catálogo (`products`) a partir de resultados ACEITOS (gtin válido + correspondência positiva
+ * do item). Só insere linhas novas — `onConflict: "gtin"` com `ignoreDuplicates: true` nunca sobrescreve
+ * `name`/`category` de um produto já existente. Erros aqui não abortam a atualização (chamador captura).
+ */
+async function seedProducts(db: Db, rows: { gtin: string; name: string }[]): Promise<void> {
+  const byGtin = new Map<string, string>();
+  for (const r of rows) {
+    const name = r.name.replace(/\s+/g, " ").trim().slice(0, 200);
+    if (name && !byGtin.has(r.gtin)) byGtin.set(r.gtin, name);
+  }
+  if (byGtin.size === 0) return;
+  const payload = [...byGtin].map(([gtin, name]) => ({ gtin, name }));
+  const { error } = await db.from("products").upsert(payload, { onConflict: "gtin", ignoreDuplicates: true });
+  if (error) throw new Error(`products upsert: ${error.message}`);
 }
 
 /** Upsert de veredictos do juiz. O trigger do banco também protege `source='user'`, mas não mandamos nem tentar. */
@@ -387,6 +405,26 @@ export async function POST(request: Request) {
       state.correspondencias += matchedKeys.size;
     } else if (usaGtin) {
       state.correspondencias += resultados.length > 0 ? 1 : 0;
+    }
+
+    // Semeia o catálogo só com resultados ACEITOS: gtin válido e (busca por gtin OU veredicto positivo
+    // — cacheado ou recém-emitido pelo juiz nesta chamada). Sem veredicto (semJuiz) não semeia por nome.
+    const toSeed: { gtin: string; name: string }[] = [];
+    const seededGtins = new Set<string>();
+    for (const r of resultados) {
+      const gtinValido = parseGtin(r.gtin);
+      if (!gtinValido || seededGtins.has(gtinValido)) continue;
+      const accepted = usaGtin || (itemKey ? cache.get(itemKey)?.get(normalizeName(r.descricao))?.isMatch === true : false);
+      if (!accepted) continue;
+      seededGtins.add(gtinValido);
+      toSeed.push({ gtin: gtinValido, name: r.descricao });
+    }
+    if (toSeed.length > 0) {
+      try {
+        await seedProducts(supabase, toSeed);
+      } catch (err) {
+        falhas.push(`${item.name}: catálogo de produtos: ${errMsg(err)}`);
+      }
     }
 
     // Observações: TODOS os resultados (preços válidos, mesmo os que não casam com este item).

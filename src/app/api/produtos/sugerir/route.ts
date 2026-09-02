@@ -1,10 +1,15 @@
 // POST /api/produtos/sugerir — autocomplete de produtos reais (fase 5, ver SPEC-fase5.md e docs/produtos.md).
-// Body { termo } (mín. 5 caracteres). Sempre busca no catálogo local (`products`); a fonte externa é o
-// `/sugestao/` do Preço da Hora, cacheada 7 dias por termo em `product_suggestions` (limite de ~20 POSTs/15 min).
-// Falha do Preço da Hora nunca vira 5xx: responde só com o local e `fonteExterna: false`.
+// Body { termo, forcarExterno? } (termo: mín. 5 caracteres). Sempre busca no catálogo local (`products`); a fonte
+// externa é o `/sugestao/` do Preço da Hora, cacheada 7 dias por termo em `product_suggestions` (limite de ~20
+// POSTs/15 min). Falha do Preço da Hora nunca vira 5xx: responde só com o local e `fonteExterna: false`.
+// Regra de suficiência local: com >= 3 resultados locais e sem `forcarExterno: true`, só usa a fonte externa se
+// já houver cache fresco do termo — nunca dispara o PdH nesse caso (devolve `motivo: "local_suficiente"`).
 
+import type { Category } from "@/lib/categories";
 import type { ProductSuggestion } from "@/lib/database.types";
 import { createClient } from "@/lib/supabase/server";
+import { categorizeNames } from "@/lib/llm/categorize";
+import { isLlmConfigured } from "@/lib/llm/groq";
 import { normalizeName } from "@/lib/normalize";
 import { PdhError, suggestPrecoDaHora } from "@/lib/precodahora/client";
 import {
@@ -23,6 +28,8 @@ const MIN_TERM_LENGTH = 5;
 const LOCAL_LIMIT = 10;
 const MAX_SUGGESTIONS = 12;
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** A partir daqui o catálogo local já é considerado suficiente: sem `forcarExterno`, não consulta o PdH. */
+const LOCAL_SUFFICIENT_THRESHOLD = 3;
 
 function fail(error: string, status: number) {
   return Response.json({ ok: false, error }, { status });
@@ -65,8 +72,15 @@ async function searchLocal(db: Db, termKey: string): Promise<ProductLite[]> {
 /**
  * Sugestões externas: cache de 7 dias em `product_suggestions`; senão consulta o Preço da Hora, faz upsert em
  * `products` e grava o cache. Devolve `null` quando a fonte externa não pôde ser usada.
+ * `allowNetwork: false` (regra de suficiência local) nunca chama o PdH: com cache fresco usa o cache normalmente;
+ * sem cache fresco, devolve `motivo: "local_suficiente"` sem consultar a rede.
  */
-async function searchExternal(db: Db, termo: string, termKey: string): Promise<{ products: ProductLite[]; aviso?: string } | null> {
+async function searchExternal(
+  db: Db,
+  termo: string,
+  termKey: string,
+  allowNetwork: boolean,
+): Promise<{ products: ProductLite[]; aviso?: string; motivo?: string } | null> {
   const { data: cached, error: cacheError } = await db
     .from("product_suggestions")
     .select("gtins, fetched_at")
@@ -77,6 +91,10 @@ async function searchExternal(db: Db, termo: string, termKey: string): Promise<{
   const fresh = cached && Date.now() - new Date(cached.fetched_at).getTime() < CACHE_TTL_MS;
   if (cached && fresh) {
     return { products: orderByGtins(await findProductsByGtins(db, cached.gtins), cached.gtins) };
+  }
+
+  if (!allowNetwork) {
+    return { products: [], motivo: "local_suficiente" };
   }
 
   try {
@@ -110,6 +128,52 @@ function orderByGtins(products: ProductLite[], gtins: string[]): ProductLite[] {
   return [...products].sort((a, b) => (rank.get(a.gtin) ?? Infinity) - (rank.get(b.gtin) ?? Infinity));
 }
 
+/**
+ * Categoriza (em memória, mutando `categoria`) as sugestões sem categoria: UMA chamada em lote ao Groq com as
+ * descrições, gravando `products.category` por gtin só onde ainda está nula. Nunca lança: se o Groq não estiver
+ * configurado, falhar ou não retornar nada útil, as sugestões seguem com `categoria: null`.
+ */
+async function categorizeMissing(db: Db, sugestoes: ProductSuggestion[]): Promise<void> {
+  const missing = sugestoes.filter((s) => !s.categoria);
+  if (missing.length === 0 || !isLlmConfigured()) return;
+
+  const gtinsByDescricao = new Map<string, string[]>();
+  for (const s of missing) {
+    const arr = gtinsByDescricao.get(s.descricao);
+    if (arr) arr.push(s.gtin);
+    else gtinsByDescricao.set(s.descricao, [s.gtin]);
+  }
+  const descricoes = [...gtinsByDescricao.keys()];
+
+  let categorias: Record<string, Category>;
+  try {
+    categorias = await categorizeNames(descricoes);
+  } catch (err) {
+    console.warn("[api/produtos/sugerir] categorizeNames:", errMsg(err));
+    return;
+  }
+  if (Object.keys(categorias).length === 0) return;
+
+  const gtinsByCategoria = new Map<Category, string[]>();
+  for (const [descricao, categoria] of Object.entries(categorias)) {
+    const gtins = gtinsByDescricao.get(descricao);
+    if (!gtins) continue;
+    const arr = gtinsByCategoria.get(categoria);
+    if (arr) arr.push(...gtins);
+    else gtinsByCategoria.set(categoria, [...gtins]);
+  }
+
+  for (const s of missing) {
+    const categoria = categorias[s.descricao];
+    if (categoria) s.categoria = categoria;
+  }
+
+  for (const [categoria, gtins] of gtinsByCategoria) {
+    const { error } = await db.from("products").update({ category: categoria }).in("gtin", gtins).is("category", null);
+    if (error) console.warn("[api/produtos/sugerir] products update category:", error.message);
+  }
+}
+
 export async function POST(request: Request) {
   const supabase = await createClient();
   const {
@@ -117,13 +181,14 @@ export async function POST(request: Request) {
   } = await supabase.auth.getUser();
   if (!user) return fail("Não autenticado", 401);
 
-  let body: { termo?: unknown };
+  let body: { termo?: unknown; forcarExterno?: unknown };
   try {
-    body = (await request.json()) as { termo?: unknown };
+    body = (await request.json()) as { termo?: unknown; forcarExterno?: unknown };
   } catch {
     return fail("Body inválido (JSON esperado)", 400);
   }
   const termo = typeof body.termo === "string" ? body.termo.replace(/\s+/g, " ").trim() : "";
+  const forcarExterno = body.forcarExterno === true;
   if (termo.length < MIN_TERM_LENGTH) return fail(`\`termo\` precisa ter pelo menos ${MIN_TERM_LENGTH} caracteres`, 400);
   const termKey = normalizeName(termo);
   if (!termKey) return fail("`termo` sem conteúdo útil", 400);
@@ -144,9 +209,11 @@ export async function POST(request: Request) {
     return fail(`Erro ao buscar no catálogo: ${errMsg(err)}`, 500);
   }
 
-  let external: { products: ProductLite[]; aviso?: string } | null = null;
+  const allowNetwork = forcarExterno || local.length < LOCAL_SUFFICIENT_THRESHOLD;
+
+  let external: { products: ProductLite[]; aviso?: string; motivo?: string } | null = null;
   try {
-    external = await searchExternal(supabase, termo, termKey);
+    external = await searchExternal(supabase, termo, termKey, allowNetwork);
   } catch (err) {
     // Erro do banco ao lidar com o cache/catálogo: segue só com o local.
     console.error("[api/produtos/sugerir] externo:", err);
@@ -178,10 +245,18 @@ export async function POST(request: Request) {
     ...externalOnly.map((p) => toSuggestion(p, "precodahora")),
   ].slice(0, MAX_SUGGESTIONS);
 
+  try {
+    await categorizeMissing(supabase, sugestoes);
+  } catch (err) {
+    // Nunca deve lançar (categorizeMissing já trata seus próprios erros), mas por segurança: sem categoria, sem 5xx.
+    console.warn("[api/produtos/sugerir] categorizeMissing:", errMsg(err));
+  }
+
   return Response.json({
     ok: true,
     sugestoes,
-    fonteExterna: external !== null,
+    fonteExterna: external !== null && !external.motivo,
     ...(external?.aviso ? { aviso: external.aviso } : {}),
+    ...(external?.motivo ? { motivo: external.motivo } : {}),
   });
 }
