@@ -5,10 +5,11 @@ As migrations são idempotentes: podem ser aplicadas mais de uma vez sem quebrar
 
 1. `0001_init.sql` — Fase 1 (households, listas, itens, RLS, realtime).
 2. `0002_precos.sql` — Fases 2/3 (histórico de preços). Requer a 0001 já aplicada.
+3. `0003_matches.sql` — Fase 4 (veredictos de correspondência). Requer a 0002 já aplicada.
 
 ## Aplicar as migrations
 
-**Opção A — Dashboard (mais simples):** abra o projeto no [Supabase Dashboard](https://supabase.com/dashboard) → *SQL Editor* → cole o conteúdo de `migrations/0001_init.sql` → *Run*; repita com `migrations/0002_precos.sql`.
+**Opção A — Dashboard (mais simples):** abra o projeto no [Supabase Dashboard](https://supabase.com/dashboard) → *SQL Editor* → cole o conteúdo de `migrations/0001_init.sql` → *Run*; repita com `migrations/0002_precos.sql` e `migrations/0003_matches.sql`.
 
 **Opção B — CLI:**
 
@@ -32,6 +33,12 @@ Em *Authentication → Providers → Email*:
 - Tabelas `stores` e `products` são catálogo compartilhado entre todos os households (qualquer usuário logado lê/insere/atualiza, ninguém apaga). `receipts`, `receipt_items` e `price_observations` seguem `is_household_member`.
 - Índice único parcial em `price_observations` (`where source = 'precodahora'`) evita duplicar leituras do Preço da Hora ao "Atualizar preços" de novo.
 - RPC `best_prices(p_list_id, p_max_age_hours default 336)` roda como *security invoker*: a RLS se aplica, então só membros do household da lista recebem linhas. Usa `extensions.similarity` qualificado (as funções do `pg_trgm` não estão no `search_path` padrão do Supabase).
+
+## Correspondências (migration 0003)
+
+- Tabela `item_matches`: veredicto por household de "esta descrição (Preço da Hora/cupom) é este item da lista?", chaveado por `normalize_name` do item e da descrição (`item_key`, `description_key`), `source` = `llm` ou `user`. RLS por `is_household_member`. Único `(household_id, item_key, description_key)` — é o `onConflict` do upsert da rota.
+- Trigger `before update`: um veredicto `source='user'` nunca é sobrescrito por um update com `source='llm'` (mantém `is_match`, `source` e `reason`); `updated_at` é atualizado sempre.
+- `best_prices` recriada (mesma assinatura/colunas): veredicto `is_match=false` exclui a observação; `is_match=true` devolve `match_kind` = `llm`/`user` com `score = 1`; sem veredicto valem as regras antigas, com o limiar de similaridade por nome subindo de 0.35 para 0.5.
 
 ## Realtime
 
