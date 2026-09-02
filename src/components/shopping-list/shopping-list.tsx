@@ -1,5 +1,7 @@
 "use client";
 
+import { normalizeName } from "@/lib/normalize";
+
 import Link from "next/link";
 import { useCallback, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
@@ -57,6 +59,9 @@ export function ShoppingList({ listId, listName, householdName, currentUserId, m
         added_by: currentUserId,
         created_at: now,
         updated_at: now,
+        product_id: null,
+        gtin: null,
+        normalized_name: normalizeName(name),
       };
       setItems((prev) => [...prev, optimistic]);
 
