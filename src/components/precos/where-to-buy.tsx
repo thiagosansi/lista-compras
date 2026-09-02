@@ -42,6 +42,7 @@ type UpdateResult = {
   itens: number;
   observacoes: number;
   correspondencias: number;
+  jaAtualizados: number;
   semJuiz: boolean;
   falhas: string[];
 };
@@ -236,6 +237,7 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
         itens: payload.itens ?? 0,
         observacoes: payload.observacoes ?? 0,
         correspondencias: payload.correspondencias ?? 0,
+        jaAtualizados: typeof payload.jaAtualizados === "number" ? payload.jaAtualizados : 0,
         semJuiz: payload.semJuiz === true,
         falhas: payload.falhas ?? [],
       });
@@ -312,10 +314,17 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
               {updateResult.observacoes} {updateResult.observacoes === 1 ? "preço novo" : "preços novos"},{" "}
               {updateResult.correspondencias}{" "}
               {updateResult.correspondencias === 1 ? "correspondência verificada" : "correspondências verificadas"}.
+              {updateResult.jaAtualizados > 0 ? (
+                <>
+                  {" "}
+                  {updateResult.jaAtualizados}{" "}
+                  {updateResult.jaAtualizados === 1 ? "item já estava atualizado" : "itens já estavam atualizados"} (últimas 24 h).
+                </>
+              ) : null}
               {updateResult.falhas.length > 0 ? (
                 <>
                   {" "}
-                  Sem resultado para: {updateResult.falhas.join(", ")}.
+                  Avisos: {updateResult.falhas.join("; ")}.
                 </>
               ) : null}
             </Alert>

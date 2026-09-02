@@ -24,8 +24,11 @@ export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const SALVADOR_CENTRO = { lat: -12.9777, lng: -38.5016 };
-const MAX_RESULTADOS_POR_ITEM = 60;
-const CONCORRENCIA = 3;
+// 1 página (25) = 1 POST por item: o Preço da Hora bloqueia (captcha) após ~20 POSTs em ~15 min por IP.
+const MAX_RESULTADOS_POR_ITEM = 25;
+const CONCORRENCIA = 1;
+/** Itens com preço correspondente buscado há menos de 24 h não são buscados de novo (poupa o limite do Preço da Hora). */
+const FRESH_MS = 24 * 60 * 60 * 1000;
 /** Depois disto não começamos novos itens, para responder antes do limite da função. */
 const BUDGET_MS = 100_000;
 /** Só chamamos o juiz se ainda sobrar isto de orçamento (a chamada pode esperar um `retry-after`). */
@@ -185,11 +188,11 @@ export async function POST(request: Request) {
 
   const lat = household?.lat ?? SALVADOR_CENTRO.lat;
   const lng = household?.lng ?? SALVADOR_CENTRO.lng;
-  const items: ItemRow[] = (itemRows ?? []).filter((i) => i.name.trim() !== "");
+  const allItems: ItemRow[] = (itemRows ?? []).filter((i) => i.name.trim() !== "");
   const falhas: string[] = [];
 
   // Veredictos cacheados: Map<item_key, Map<description_key, veredicto>>.
-  const itemKeys = [...new Set(items.map((i) => normalizeName(i.name)).filter(Boolean))];
+  const itemKeys = [...new Set(allItems.map((i) => normalizeName(i.name)).filter(Boolean))];
   const cache = new Map<string, Map<string, CachedVerdict>>();
   if (itemKeys.length > 0) {
     const { data: matchRows, error: matchError } = await supabase
@@ -206,6 +209,26 @@ export async function POST(request: Request) {
       per.set(m.description_key, { isMatch: m.is_match, source: m.source, gtin: m.gtin });
     }
   }
+
+  // ---- 1b. Pula itens já atualizados nas últimas 24 h ----
+  const { data: freshRows } = await supabase
+    .from("price_observations")
+    .select("normalized_name, gtin")
+    .eq("household_id", householdId)
+    .eq("source", "precodahora")
+    .gte("created_at", new Date(Date.now() - FRESH_MS).toISOString());
+  const freshDescs = new Set((freshRows ?? []).map((r) => r.normalized_name));
+  const freshGtins = new Set((freshRows ?? []).map((r) => r.gtin).filter((g): g is string => Boolean(g)));
+  const jaAtualizados: string[] = [];
+  const items = allItems.filter((item) => {
+    const fresh = hasGtin(item)
+      ? freshGtins.has(digitsOf(item.gtin))
+      : [...(cache.get(normalizeName(item.name))?.entries() ?? [])].some(
+          ([desc, v]) => v.isMatch && freshDescs.has(desc),
+        );
+    if (fresh) jaAtualizados.push(item.name);
+    return !fresh;
+  });
 
   // ---- 2. Plano de busca (uma chamada ao Groq para todos os itens) ----
   let semJuiz = !isLlmConfigured();
@@ -249,8 +272,12 @@ export async function POST(request: Request) {
         maxResultados: MAX_RESULTADOS_POR_ITEM,
       });
     } catch (err) {
-      if (err instanceof PdhError && err.blocked) state.blocked = err;
-      falhas.push(`${item.name}: ${errMsg(err)}`);
+      if (err instanceof PdhError && err.blocked) {
+        state.blocked = err;
+        falhas.push(`${item.name}: não buscado (limite do Preço da Hora)`);
+      } else {
+        falhas.push(`${item.name}: ${errMsg(err)}`);
+      }
       return;
     }
 
@@ -394,13 +421,16 @@ export async function POST(request: Request) {
   });
 
   if (state.blocked) {
-    falhas.push(`Busca interrompida: ${state.blocked.message}`);
+    falhas.push(
+      "Preço da Hora limitou as buscas por agora. Os itens já buscados ficaram salvos; tente de novo em uns 15 minutos.",
+    );
   }
 
   // ---- 6. Resposta ----
   return Response.json({
     ok: true,
     itens: items.length,
+    jaAtualizados: jaAtualizados.length,
     observacoes: state.observacoes,
     correspondencias: state.correspondencias,
     semJuiz: state.semJuiz,
