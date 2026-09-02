@@ -28,16 +28,21 @@ const MAX_EXCLUDE_WORDS = 14;
 export type SearchPlan = { termo: string; excluir: string[]; observacao?: string };
 
 /**
- * Palavras que desqualificam qualquer item de mercearia humana (uso animal), aplicadas sempre —
- * a menos que o próprio item as contenha (ex.: "ração para gatos"). Rede de segurança determinística
- * para quando o modelo esquece de listá-las.
+ * Grupos de palavras que desqualificam qualquer item de mercearia, aplicados sempre — cada grupo é pulado
+ * se o próprio item contém uma palavra dele (ex.: "ração para gatos", "bala de café"). Rede de segurança
+ * determinística: o modelo às vezes esquece essas palavras (a saída varia entre chamadas mesmo em temperature 0).
  */
-export const UNIVERSAL_EXCLUDE = ["racao", "caes", "cao", "cachorro", "cachorros", "gato", "gatos", "pet", "puppy", "canino", "felino"];
+export const UNIVERSAL_EXCLUDE_GROUPS: readonly (readonly string[])[] = [
+  // uso animal
+  ["racao", "caes", "cao", "cachorro", "cachorros", "gato", "gatos", "pet", "puppy", "canino", "felino"],
+  // doces "sabor X" que aparecem baratos para café, leite, manteiga, coco…
+  ["bala", "balas", "caramelo", "bombom", "pirulito", "chiclete"],
+];
 
 /**
  * Sanitiza a lista de exclusões: descarta entradas que compartilham alguma palavra com o termo de busca
  * ou com o nome do item (o modelo já devolveu "papel higienico" como exclusão de "papel higiênico"…) e
- * acrescenta as exclusões universais.
+ * acrescenta os grupos universais.
  */
 function sanitizeExclusions(itemName: string, termo: string, excluir: string[]): string[] {
   const ownTokens = new Set(`${normalizeName(itemName)} ${normalizeName(termo)}`.split(" ").filter(Boolean));
@@ -47,8 +52,10 @@ function sanitizeExclusions(itemName: string, termo: string, excluir: string[]):
     if (tokens.length === 0 || tokens.some((t) => ownTokens.has(t))) continue;
     if (!out.includes(e)) out.push(e);
   }
-  if (UNIVERSAL_EXCLUDE.some((w) => ownTokens.has(w))) return out;
-  for (const w of UNIVERSAL_EXCLUDE) if (!out.includes(w)) out.push(w);
+  for (const group of UNIVERSAL_EXCLUDE_GROUPS) {
+    if (group.some((w) => ownTokens.has(w))) continue;
+    for (const w of group) if (!out.includes(w)) out.push(w);
+  }
   return out;
 }
 export type PlanItem = { id: string; name: string };

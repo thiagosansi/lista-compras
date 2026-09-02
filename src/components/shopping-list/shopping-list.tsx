@@ -62,6 +62,7 @@ export function ShoppingList({ listId, listName, householdName, currentUserId, m
         product_id: null,
         gtin: null,
         normalized_name: normalizeName(name),
+        category: null,
       };
       setItems((prev) => [...prev, optimistic]);
 

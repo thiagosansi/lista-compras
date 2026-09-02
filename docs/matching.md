@@ -46,8 +46,9 @@ Só para priorizar candidatos quando há mais de 40 (não replica o `similarity(
   Pós-processamento determinístico:
   - `sanitizeExclusions`: descarta exclusões que compartilham palavra com o termo ou com o nome do item (o 120b
     devolveu `"papel higienico"` e `"papel toalha"` como exclusões de "Papel higiênico 12 rolos" — teria zerado
-    a busca) e acrescenta `UNIVERSAL_EXCLUDE` (`racao caes cao cachorro(s) gato(s) pet puppy canino felino`) a menos
-    que o item mesmo seja de pet. Motivo: o 20b/120b às vezes "esquecem" as palavras de ração para arroz (saída
+    a busca) e acrescenta os grupos `UNIVERSAL_EXCLUDE_GROUPS` (uso animal: `racao caes cao cachorro(s) gato(s) pet
+    puppy canino felino`; doces: `bala(s) caramelo bombom pirulito chiclete`), cada grupo pulado se o próprio item
+    contém uma palavra dele. Motivo: o 20b/120b às vezes "esquecem" as palavras de ração para arroz (saída
     varia entre chamadas mesmo com `temperature: 0`).
 - `judgeMatches(item, candidates)` → `{ description, isMatch, reason }[]`. `selectCandidates` deduplica por
   `normalizeName` e, acima de 40, fica com os 20 mais baratos + os mais parecidos (Dice). O prompt recebe uma lista
@@ -153,10 +154,40 @@ têm o **mesmo GTIN (7896384100121)** de `ARROZ P/ CAES MATILHA 5KG`, que foi ex
 script) rejeitam por GTIN antes do juiz. Com o termo antigo (`arroz`, sem tamanho) os 60 mais baratos eram sachês
 de ração e balas — nenhum arroz de 5 kg aparecia.
 
-**Café 500g, Manteiga, Papel higiênico 12 rolos** — ver seção abaixo (rodada separada por causa do bloqueio do
-Preço da Hora).
+**Café 500g** (offline, 19 descrições reais da 1ª página de `cafe 500g` na sondagem; Preço da Hora bloqueado na hora da
+rodada final) — 13 excluídas pelo plano antes do juiz (milho ×4, cevada ×3, bala ×2, caramelo, soluvel, cappuccino,
+filtro); 6 ao juiz (1 259 in / 272 out, 1,0 s): 5 correspondem, 1 rejeitada.
+```
++ R$ 17,90  CAFE MARATA 500G                         ok
++ R$ 19,90  CAFE TORRADO E MOIDO SANTA CLARA 500G    ok
++ R$ 21,99  CAFE 3 CORACOES TRADICIONAL 500G         ok
++ R$ 23,50  CAFE PILAO EXTRA FORTE 500G              ok
++ R$ 59,90  CAFE EM GRAOS ORFEU 500G                 ok   (discutível: "café" sem qualificador; usuário corrige na tela)
+- R$  9,90  CAFE MARATA 250G                         tamanho 250g
+```
+Com o termo antigo (`cafe`, sem tamanho) os 60 mais baratos eram balas de café a R$ 0,15–0,40 e o `gpt-oss-20b` aceitou
+38 delas como "Café 500g" — o problema estava tanto no termo quanto no juiz.
 
-<!-- RODADA_FINAL_3 -->
+**Papel higiênico 12 rolos** (offline, 12 descrições reais de `papel higienico 12`) — 2 excluídas (toalha, lenco);
+10 ao juiz (1 417 in / 407 out; 28 s por `queue_time` do plano gratuito): 8 correspondem, 2 rejeitadas.
+```
++ R$ 10,49  PAPEL HIGIENICO 12 ROLO                                     ok
++ R$ 10,60  PAPEL HIGIENICO FL. SIMPLES 30M SUBLIME SOFTYS PT 12 RL     ok
++ R$ 11,19  PAPEL HIGIENICO CAPRICE FOLHA DUPLA 12 / 11 NEUTRO           ok
++ R$ 20,49  MIMMO PAPEL HIGIENICO FOLHA TRIPLA, 20M, LEVE 12 PAGUE 11    ok
+- R$  8,90  PAPEL HIGIENICO NEVE 4 ROLOS 30M                            4 rolos
+- R$ 18,90  PAPEL HIGIENICO PERSONAL 16 ROLOS                           16 rolos
+```
+Correto, inclusive as abreviações `12 RL`, `12 / 11` e `LEVE 12 PAGUE 11`.
+
+**Manteiga** — só o plano foi validado (`manteiga`; excluir margarina, cacau, karite, amendoim + doces + pet). Não houve
+resultados do Preço da Hora nesta sessão (bloqueio). Fica para a próxima rodada com IP liberado:
+`pnpm dlx tsx scripts/match-eval.mjs --items "Manteiga" --cache /tmp/pdh-cache`.
+
+Resumo das 3 iterações de prompt: (1) termo sem tamanho + juiz genérico → balas/ração/leite em pó aceitos;
+(2) tamanho no termo, saída compacta, `reasoning_effort: low` → 20b passou a errar grosseiramente (rejeitou todo
+arroz com motivo "tamanho 5kg, pedido 5kg"), 120b/qwen corretos; (3) preço no prompt do juiz, regras por família,
+sanitização + grupos universais de exclusão, propagação por GTIN → resultado acima.
 
 ### Modelos comparados (mesmos candidatos em cache)
 
@@ -183,8 +214,9 @@ só por ser menos testado aqui (2 itens).
 - Preço da Hora: 2–6 s por item (3 páginas). É o gargalo de tempo e o risco de bloqueio.
 
 ## Pendências / riscos
-1. **Bloqueio do Preço da Hora por volume.** Observado 3 vezes nesta sessão: após ~12 POSTs em rajada e após ~20 em
-   10 min; o bloqueio durou > 15 min. `maxResultados: 60` triplica as chamadas da fase 3. Sugestões (fora da minha
+1. **Bloqueio do Preço da Hora por volume.** Observado 3 vezes nesta sessão: após ~12 POSTs em rajada, depois após
+   ~20 em 10 min; o segundo bloqueio **ainda estava ativo 35 min depois** (provavelmente só sai resolvendo o reCAPTCHA
+   em `/challenge/` no navegador). `maxResultados: 60` triplica as chamadas da fase 3. Sugestões (fora da minha
    área/decisão de produto): 25–50 resultados quando o termo já tem tamanho; pausa entre itens; ou uma fila/cron
    que atualiza poucos itens por vez.
 2. **TPM do Groq.** Se a lista cresce, considerar Dev Tier, ou reduzir o prompt de sistema do juiz (~900 tokens),
