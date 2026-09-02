@@ -8,10 +8,11 @@ As migrations são idempotentes: podem ser aplicadas mais de uma vez sem quebrar
 3. `0003_matches.sql` — Fase 4 (veredictos de correspondência). Requer a 0002 já aplicada.
 4. `0004_compras.sql` — Fase 5 (categorias, sugestões, modo Compras). Requer a 0003 já aplicada.
 5. `0005_products_trgm.sql` — índice trigram em `products.normalized_name` (busca local por `ilike '%palavra%'` no catálogo). Requer a 0002 já aplicada.
+6. `0006_secoes.sql` — seções por layout de mercado: substitui "Frios e laticínios" por "Frios e refrigerados" e reordena `CATEGORIES`. Requer a 0004 já aplicada.
 
 ## Aplicar as migrations
 
-**Opção A — Dashboard (mais simples):** abra o projeto no [Supabase Dashboard](https://supabase.com/dashboard) → *SQL Editor* → cole o conteúdo de `migrations/0001_init.sql` → *Run*; repita com `migrations/0002_precos.sql`, `migrations/0003_matches.sql`, `migrations/0004_compras.sql` e `migrations/0005_products_trgm.sql`.
+**Opção A — Dashboard (mais simples):** abra o projeto no [Supabase Dashboard](https://supabase.com/dashboard) → *SQL Editor* → cole o conteúdo de `migrations/0001_init.sql` → *Run*; repita com `migrations/0002_precos.sql`, `migrations/0003_matches.sql`, `migrations/0004_compras.sql`, `migrations/0005_products_trgm.sql` e `migrations/0006_secoes.sql`.
 
 **Opção B — CLI:**
 
@@ -51,6 +52,13 @@ Em *Authentication → Providers → Email*:
 ## Catálogo (migration 0005)
 
 - Índice GIN `products_normalized_name_trgm_idx` em `products.normalized_name` (mesmo padrão de `price_observations_normalized_name_trgm_idx` da 0002), para a busca local por `ilike '%palavra%'` continuar rápida à medida que o catálogo cresce com a semeadura. Não altera RLS, colunas ou outras tabelas.
+
+## Seções por layout de mercado (migration 0006)
+
+- Motivo: o usuário reportou manteiga agrupada com leite (ambos "laticínio"), e leite condensado separado do leite em pó — a lista de categorias deve seguir a **seção física do mercado**, não o tipo de alimento. "Frios e laticínios" deixa de existir; vira "Frios e refrigerados" (só geladeira/vitrine refrigerada: manteiga, margarina, queijo, requeijão, iogurte, presunto, mortadela, leite pasteurizado, ovos). Leite UHT/em pó/condensado, creme de leite, achocolatado etc. (prateleira seca) passam a "Mercearia" — via prompt do LLM (`src/lib/llm/categorize.ts`), não por mudança de schema. A ordem de `CATEGORIES` também muda para refletir o percurso físico do mercado (ver `src/lib/categories.ts`).
+- A migration solta os 3 `check` (`products`, `list_items`, `item_categories`) **antes** de migrar o valor legado nas 3 tabelas (o check antigo não aceita "Frios e refrigerados"), depois recria os 3 checks com a lista nova de `CATEGORIES` — mesmo padrão de repetição literal da 0004 (se `CATEGORIES` mudar, mude aqui também).
+- `LEGACY_CATEGORY_MAP` e `normalizeCategory()` em `src/lib/categories.ts` espelham o passo 2 da migration no lado da aplicação (útil se algum dado antigo aparecer fora do banco, ex. cache de cliente).
+- Limpeza **limitada** (não zera tudo): descarta só as entradas `item_categories` com `source = 'llm'` nas duas categorias que mudaram de regra (`Frios e refrigerados` e `Mercearia`) — a próxima categorização re-consulta o Groq com o prompt novo. `list_items.category` nessas 2 categorias volta a `null`, **exceto** quando existe um veredicto `source = 'user'` para o mesmo `item_key` (preservado). Idempotente: numa 2ª aplicação não sobra nada para migrar/limpar.
 
 ## Realtime
 

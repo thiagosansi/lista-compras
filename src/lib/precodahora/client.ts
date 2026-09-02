@@ -42,6 +42,8 @@ export type SearchParams = {
   horas?: number;
   /** Máximo de resultados (default 25, teto 100). */
   maxResultados?: number;
+  /** Chamado uma vez antes de cada POST enviado (inclusive páginas subsequentes) — para orçamento de requisições do chamador. */
+  onRequest?: () => void;
 };
 
 /** Registro bruto como vem do /produtos/ (campos observados no spike; todos tratados como opcionais). */
@@ -350,6 +352,7 @@ export async function searchPrecoDaHora(params: SearchParams): Promise<PdhResult
   let pagina = 1;
   let totalPaginas = 1;
   while (out.length < max && pagina <= totalPaginas && pagina <= MAX_PAGES) {
+    normalized.onRequest?.();
     const json = await postWithRetry(buildForm(normalized, pagina));
     totalPaginas = typeof json.totalPaginas === "number" ? json.totalPaginas : 1;
     const rows = Array.isArray(json.resultado) ? json.resultado : [];

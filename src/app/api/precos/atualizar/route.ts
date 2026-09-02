@@ -3,7 +3,9 @@
 //
 // Passos: 1) carrega household/itens/veredictos cacheados; 2) planSearches (Groq) → termo + palavras excluídas;
 // 3) busca por item (pool de 3), descarta candidatos com palavra excluída; 4) juiz (Groq) para descrições
-// ainda sem veredicto e upsert em item_matches; 5) insere TODAS as observações; 6) resposta.
+// ainda sem veredicto e upsert em item_matches; 5) insere TODAS as observações; 5b) para item de texto livre,
+// busca extra por gtin do produto aceito mais barato (mais lojas), respeitando o orçamento de requisições;
+// 6) resposta.
 // Se o Groq falhar em qualquer passo, a atualização continua sem ele (`semJuiz: true`).
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -34,6 +36,8 @@ const FRESH_MS = 24 * 60 * 60 * 1000;
 const BUDGET_MS = 100_000;
 /** Só chamamos o juiz se ainda sobrar isto de orçamento (a chamada pode esperar um `retry-after`). */
 const JUDGE_MIN_REMAINING_MS = 12_000;
+/** Teto de POSTs ao Preço da Hora por atualização (buscas por termo, por gtin e as extras por gtin). */
+const MAX_REQUESTS = 15;
 
 type Db = SupabaseClient<Database>;
 type ObservationInsert = Database["public"]["Tables"]["price_observations"]["Insert"];
@@ -171,6 +175,50 @@ async function upsertMatches(db: Db, rows: MatchInsert[]): Promise<void> {
   if (error) throw new Error(`item_matches upsert: ${error.message}`);
 }
 
+/**
+ * Constrói e insere as observações de preço de `resultados` (dedup via `seen`, compartilhado entre a busca
+ * principal e a busca extra por gtin do mesmo item). Retorna quantas linhas novas foram inseridas.
+ */
+async function insertResultObservations(
+  db: Db,
+  householdId: string,
+  storeCache: Map<string, Promise<string>>,
+  seen: Set<string>,
+  resultados: PdhResult[],
+  itemLabel: string,
+  falhas: string[],
+): Promise<number> {
+  const rows: ObservationInsert[] = [];
+  for (const r of resultados) {
+    try {
+      const storeId = await resolveStoreId(db, r.loja, storeCache);
+      const dedupe = `${storeId}|${r.gtin ?? ""}|${normalizeName(r.descricao)}|${r.data}`;
+      if (seen.has(dedupe)) continue;
+      seen.add(dedupe);
+      rows.push({
+        household_id: householdId,
+        store_id: storeId,
+        gtin: r.gtin,
+        description: r.descricao,
+        price: r.preco,
+        unit: r.unidade,
+        observed_at: r.data,
+        valid_until: null,
+        source: "precodahora",
+      });
+    } catch (err) {
+      falhas.push(`${itemLabel} / ${r.loja.nome}: ${errMsg(err)}`);
+    }
+  }
+
+  try {
+    return await insertObservations(db, rows);
+  } catch (err) {
+    falhas.push(`${itemLabel}: ${errMsg(err)}`);
+    return 0;
+  }
+}
+
 export async function POST(request: Request) {
   const startedAt = Date.now();
   const supabase = await createClient();
@@ -265,7 +313,14 @@ export async function POST(request: Request) {
   const storeCache = new Map<string, Promise<string>>();
   const seen = new Set<string>();
   const withJudgeLock = createLock();
-  const state = { blocked: null as PdhError | null, observacoes: 0, correspondencias: 0, semJuiz };
+  const state = {
+    blocked: null as PdhError | null,
+    observacoes: 0,
+    correspondencias: 0,
+    semJuiz,
+    requisicoes: 0,
+    orcamentoEsgotado: 0,
+  };
 
   await runPool(items, CONCORRENCIA, async (item) => {
     if (state.blocked) return;
@@ -288,6 +343,9 @@ export async function POST(request: Request) {
         raioKm: 10,
         horas: 72,
         maxResultados: MAX_RESULTADOS_POR_ITEM,
+        onRequest: () => {
+          state.requisicoes++;
+        },
       });
     } catch (err) {
       if (err instanceof PdhError && err.blocked) {
@@ -428,39 +486,84 @@ export async function POST(request: Request) {
     }
 
     // Observações: TODOS os resultados (preços válidos, mesmo os que não casam com este item).
-    const rows: ObservationInsert[] = [];
-    for (const r of resultados) {
-      try {
-        const storeId = await resolveStoreId(supabase, r.loja, storeCache);
-        const dedupe = `${storeId}|${r.gtin ?? ""}|${normalizeName(r.descricao)}|${r.data}`;
-        if (seen.has(dedupe)) continue;
-        seen.add(dedupe);
-        rows.push({
-          household_id: householdId,
-          store_id: storeId,
-          gtin: r.gtin,
-          description: r.descricao,
-          price: r.preco,
-          unit: r.unidade,
-          observed_at: r.data,
-          valid_until: null,
-          source: "precodahora",
-        });
-      } catch (err) {
-        falhas.push(`${item.name} / ${r.loja.nome}: ${errMsg(err)}`);
-      }
-    }
+    state.observacoes += await insertResultObservations(
+      supabase,
+      householdId,
+      storeCache,
+      seen,
+      resultados,
+      item.name,
+      falhas,
+    );
 
-    try {
-      state.observacoes += await insertObservations(supabase, rows);
-    } catch (err) {
-      falhas.push(`${item.name}: ${errMsg(err)}`);
+    // ---- 5b. Item de texto livre: busca extra por gtin do produto ACEITO mais barato ----
+    // Resultados vêm ordenados por preço crescente (ordenar=preco.asc no Preço da Hora), então o primeiro
+    // aceito com gtin válido já é o mais barato. Uma busca por gtin (25 resultados) traz esse mesmo produto
+    // em várias lojas, o que a busca por termo (25 resultados de produtos distintos) não garante.
+    if (!usaGtin && itemKey && !state.blocked) {
+      let extraGtin: string | null = null;
+      for (const r of resultados) {
+        const g = parseGtin(r.gtin);
+        if (!g) continue;
+        if (cache.get(itemKey)?.get(normalizeName(r.descricao))?.isMatch === true) {
+          extraGtin = g;
+          break;
+        }
+      }
+
+      if (extraGtin) {
+        if (state.requisicoes >= MAX_REQUESTS || Date.now() - startedAt > BUDGET_MS) {
+          state.orcamentoEsgotado++;
+        } else {
+          try {
+            const extra = await searchPrecoDaHora({
+              gtin: extraGtin,
+              lat,
+              lng,
+              raioKm: 10,
+              horas: 72,
+              maxResultados: MAX_RESULTADOS_POR_ITEM,
+              onRequest: () => {
+                state.requisicoes++;
+              },
+            });
+            if (extra.length > 0) {
+              try {
+                await seedProducts(supabase, [{ gtin: extraGtin, name: extra[0].descricao }]);
+              } catch (err) {
+                falhas.push(`${item.name}: catálogo de produtos (busca extra por código): ${errMsg(err)}`);
+              }
+              state.observacoes += await insertResultObservations(
+                supabase,
+                householdId,
+                storeCache,
+                seen,
+                extra,
+                item.name,
+                falhas,
+              );
+            }
+          } catch (err) {
+            if (err instanceof PdhError && err.blocked) {
+              state.blocked = err;
+              falhas.push(`${item.name}: não buscado (limite do Preço da Hora)`);
+            } else {
+              falhas.push(`${item.name}: busca extra por código: ${errMsg(err)}`);
+            }
+          }
+        }
+      }
     }
   });
 
   if (state.blocked) {
     falhas.push(
       "Preço da Hora limitou as buscas por agora. Os itens já buscados ficaram salvos; tente de novo em uns 15 minutos.",
+    );
+  }
+  if (state.orcamentoEsgotado > 0) {
+    falhas.push(
+      `Orçamento de requisições esgotado; ${state.orcamentoEsgotado} itens sem busca extra por código.`,
     );
   }
 
@@ -472,6 +575,7 @@ export async function POST(request: Request) {
     observacoes: state.observacoes,
     correspondencias: state.correspondencias,
     semJuiz: state.semJuiz,
+    requisicoes: state.requisicoes,
     falhas,
   });
 }

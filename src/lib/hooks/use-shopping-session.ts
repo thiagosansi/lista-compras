@@ -51,6 +51,11 @@ export function useShoppingSession(initialSession: ShoppingSession | null, initi
   }, []);
 
   const applySessionChange = useCallback((payload: RealtimePostgresChangesPayload<ShoppingSession>) => {
+    if (payload.eventType === "DELETE") {
+      // Sessão cancelada/apagada por outro dispositivo: volta para a tela "Começar compra".
+      setSession((prev) => (prev && prev.id === payload.old.id ? null : prev));
+      return;
+    }
     if (payload.eventType !== "UPDATE") return;
     const next = payload.new;
     setSession((prev) => (prev && prev.id === next.id ? { ...prev, ...next, total: Number(next.total) } : prev));
@@ -68,7 +73,7 @@ export function useShoppingSession(initialSession: ShoppingSession | null, initi
       )
       .on<ShoppingSession>(
         "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "shopping_sessions", filter: `id=eq.${sessionId}` },
+        { event: "*", schema: "public", table: "shopping_sessions", filter: `id=eq.${sessionId}` },
         applySessionChange,
       )
       .subscribe();

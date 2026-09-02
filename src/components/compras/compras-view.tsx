@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { Database, ListItem, ShoppingSession, ShoppingSessionItem } from "@/lib/database.types";
 import { CATEGORIES, DEFAULT_CATEGORY, isCategory, type Category } from "@/lib/categories";
+import { normalizeName } from "@/lib/normalize";
 import { useListItems, upsertItem, TEMP_ID_PREFIX } from "@/lib/hooks/use-list-items";
 import { useShoppingSession, upsertSessionItem } from "@/lib/hooks/use-shopping-session";
 import { AppHeader } from "@/components/app-header";
@@ -12,9 +13,28 @@ import { TabBar, TAB_BAR_PADDING_CLASS } from "@/components/nav/tab-bar";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { StartSession, type RecentStore, type StoreChoice } from "./start-session";
+import { StartSession } from "./start-session";
+import { StorePicker, type RecentStore, type StoreChoice } from "./store-picker";
+import { BottomSheet } from "./bottom-sheet";
 import { PickSheet, CartItemSheet, type PickResult } from "./pick-sheet";
+import { CategorySheet } from "./category-sheet";
 import { formatDate, formatMoney, formatQuantity } from "./format";
+
+type SupabaseClient = ReturnType<typeof createClient>;
+
+/**
+ * Resolve o `store_id` de uma escolha de loja: usa o id já conhecido (recente, busca
+ * ou "mais próxima") ou, para texto livre, reaproveita uma loja com o mesmo nome
+ * (ilike exato) ou cria uma nova sem CNPJ — assim preços confirmados viram observações
+ * desta loja mesmo sem cadastro completo.
+ */
+async function resolveStoreId(supabase: SupabaseClient, choice: StoreChoice): Promise<string | null> {
+  if (choice.storeId) return choice.storeId;
+  const { data: existing } = await supabase.from("stores").select("id").ilike("name", choice.storeName).limit(1).maybeSingle();
+  if (existing) return existing.id;
+  const { data: created } = await supabase.from("stores").insert({ name: choice.storeName }).select("id").single();
+  return created?.id ?? null;
+}
 
 export type SessionHistoryEntry = {
   id: string;
@@ -35,7 +55,12 @@ type ComprasViewProps = {
   initialHistory: SessionHistoryEntry[];
 };
 
-type Sheet = { kind: "pick"; item: ListItem } | { kind: "cart"; item: ShoppingSessionItem } | null;
+type Sheet =
+  | { kind: "pick"; item: ListItem }
+  | { kind: "cart"; item: ShoppingSessionItem }
+  | { kind: "store" }
+  | { kind: "category"; item: ListItem }
+  | null;
 
 type CategorizeResponse = { ok: true; categorias: Record<string, string> } | { ok: false; error: string };
 
@@ -62,6 +87,11 @@ export function ComprasView({
   const [finishing, setFinishing] = useState(false);
   const [confirmFinish, setConfirmFinish] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [storeChoice, setStoreChoice] = useState<StoreChoice | null>(null);
+  const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [canceling, setCanceling] = useState(false);
 
   const isOpen = session != null && session.finished_at == null;
   const isFinished = session != null && session.finished_at != null;
@@ -137,17 +167,7 @@ export function ComprasView({
     async (choice: StoreChoice) => {
       setStarting(true);
       setStartError(null);
-      let storeId = choice.storeId;
-      if (!storeId) {
-        // Texto livre: reaproveita uma loja com o mesmo nome ou cria uma sem CNPJ
-        // (assim os preços confirmados viram observações desta loja).
-        const { data: existing } = await supabase.from("stores").select("id").ilike("name", choice.storeName).limit(1).maybeSingle();
-        if (existing) storeId = existing.id;
-        else {
-          const { data: created } = await supabase.from("stores").insert({ name: choice.storeName }).select("id").single();
-          storeId = created?.id ?? null;
-        }
-      }
+      const storeId = await resolveStoreId(supabase, choice);
       const { data, error } = await supabase
         .from("shopping_sessions")
         .insert({ household_id: householdId, list_id: listId, store_id: storeId, store_name: choice.storeName })
@@ -281,6 +301,29 @@ export function ComprasView({
     [supabase, setCartItems, setListItems, fail],
   );
 
+  const handleCategoryChange = useCallback(
+    async (item: ListItem, category: Category) => {
+      setListItems((prev) => upsertItem(prev, { ...item, category }));
+      setSheet(null);
+      const { error: updErr } = await supabase.from("list_items").update({ category }).eq("id", item.id);
+      if (updErr) {
+        setListItems((prev) => upsertItem(prev, item));
+        fail("Não foi possível mover o item. Tente de novo.");
+        return;
+      }
+      // Cache por nome: vale para outros itens (e futuras listas) com o mesmo nome normalizado.
+      // Erro aqui não desfaz o item já movido — só falha em lembrar a seção da próxima vez.
+      const itemKey = normalizeName(item.name);
+      if (itemKey) {
+        const { error: cacheErr } = await supabase
+          .from("item_categories")
+          .upsert({ item_key: itemKey, category, source: "user" }, { onConflict: "item_key" });
+        if (cacheErr) fail("Seção salva neste item, mas não foi possível lembrar para a próxima vez.");
+      }
+    },
+    [supabase, setListItems, fail],
+  );
+
   const handleFinish = useCallback(async () => {
     if (!session) return;
     setFinishing(true);
@@ -299,6 +342,63 @@ export function ComprasView({
     }
     setSession(data ? { ...data, total: Number(data.total) } : { ...session, finished_at: finishedAt, total });
   }, [session, supabase, total, setSession, fail]);
+
+  const handleSwitchStore = useCallback(
+    async (choice: StoreChoice) => {
+      if (!session) return;
+      setSwitching(true);
+      setSwitchError(null);
+      const storeId = await resolveStoreId(supabase, choice);
+      const { data, error } = await supabase
+        .from("shopping_sessions")
+        .update({ store_id: storeId, store_name: choice.storeName })
+        .eq("id", session.id)
+        .select()
+        .single();
+      setSwitching(false);
+      if (error || !data) {
+        setSwitchError("Não foi possível trocar de loja. Tente de novo.");
+        return;
+      }
+      // Itens já no carrinho mantêm o preço registrado: não mexe em shopping_session_items.
+      setSession({ ...data, total: Number(data.total) });
+      setSheet(null);
+      setStoreChoice(null);
+    },
+    [session, supabase, setSession],
+  );
+
+  const handleCancel = useCallback(async () => {
+    if (!session) return;
+    setCanceling(true);
+    // Desmarca só os list_items que estão no carrinho desta sessão; itens marcados
+    // fora dela (por outro fluxo) não são tocados.
+    const listItemIds = [...new Set(cartItems.flatMap((i) => (i.list_item_id ? [i.list_item_id] : [])))];
+    if (listItemIds.length > 0) {
+      const { error: updErr } = await supabase
+        .from("list_items")
+        .update({ checked: false, checked_at: null, checked_by: null })
+        .in("id", listItemIds);
+      if (updErr) {
+        setCanceling(false);
+        fail("Não foi possível cancelar. Tente de novo.");
+        return;
+      }
+    }
+    const { error: delErr } = await supabase.from("shopping_sessions").delete().eq("id", session.id);
+    setCanceling(false);
+    if (delErr) {
+      fail("Não foi possível cancelar. Tente de novo.");
+      return;
+    }
+    if (listItemIds.length > 0) {
+      setListItems((prev) => prev.map((li) => (listItemIds.includes(li.id) ? { ...li, checked: false, checked_at: null, checked_by: null } : li)));
+    }
+    setSession(null);
+    setCartItems([]);
+    setConfirmCancel(false);
+    setSheet(null);
+  }, [session, cartItems, supabase, setListItems, setSession, setCartItems, fail]);
 
   const handleNewShopping = useCallback(() => {
     if (session?.finished_at) {
@@ -395,6 +495,44 @@ export function ComprasView({
               </p>
             </Card>
 
+            <Card className="flex flex-col gap-2">
+              {confirmCancel ? (
+                <>
+                  <p className="text-sm text-zinc-700 dark:text-zinc-300">
+                    Cancelar a compra em {storeLabel}?{" "}
+                    {cartItems.length > 0
+                      ? `${cartItems.length} ${cartItems.length === 1 ? "item volta" : "itens voltam"} para a lista.`
+                      : "O carrinho está vazio."}
+                  </p>
+                  <div className="flex gap-2">
+                    <Button variant="danger" full disabled={canceling} onClick={() => void handleCancel()}>
+                      {canceling ? "Cancelando..." : "Sim, cancelar"}
+                    </Button>
+                    <Button variant="secondary" full disabled={canceling} onClick={() => setConfirmCancel(false)}>
+                      Voltar
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <div className="flex gap-2">
+                  <Button
+                    variant="secondary"
+                    full
+                    onClick={() => {
+                      setSwitchError(null);
+                      setStoreChoice(null);
+                      setSheet({ kind: "store" });
+                    }}
+                  >
+                    Trocar loja
+                  </Button>
+                  <Button variant="danger" full onClick={() => setConfirmCancel(true)}>
+                    Cancelar compra
+                  </Button>
+                </div>
+              )}
+            </Card>
+
             {pendingCount === 0 ? (
               <p className="px-1 py-4 text-center text-sm text-zinc-500 dark:text-zinc-400">
                 {listItems.length === 0 ? "A lista está vazia. Adicione itens na aba Lista." : "Tudo no carrinho! 🎉"}
@@ -407,12 +545,12 @@ export function ComprasView({
                   </h2>
                   <ul className="overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
                     {g.items.map((item) => (
-                      <li key={item.id} className="border-b border-zinc-100 last:border-b-0 dark:border-zinc-800">
+                      <li key={item.id} className="flex items-stretch border-b border-zinc-100 last:border-b-0 dark:border-zinc-800">
                         <button
                           type="button"
                           onClick={() => setSheet({ kind: "pick", item })}
                           disabled={isTemp(item.id)}
-                          className="flex min-h-14 w-full items-center gap-3 px-3 py-2 text-left active:bg-zinc-50 disabled:opacity-60 dark:active:bg-zinc-800"
+                          className="flex min-h-14 min-w-0 flex-1 items-center gap-3 px-3 py-2 text-left active:bg-zinc-50 disabled:opacity-60 dark:active:bg-zinc-800"
                         >
                           <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-zinc-300 dark:border-zinc-600" aria-hidden />
                           <span className="min-w-0 flex-1">
@@ -432,6 +570,15 @@ export function ComprasView({
                               código
                             </span>
                           ) : null}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSheet({ kind: "category", item })}
+                          disabled={isTemp(item.id)}
+                          aria-label={`Mover "${item.name}" para outra seção`}
+                          className="flex w-11 shrink-0 items-center justify-center text-zinc-400 active:bg-zinc-50 disabled:opacity-60 dark:text-zinc-500 dark:active:bg-zinc-800"
+                        >
+                          <TagIcon />
                         </button>
                       </li>
                     ))}
@@ -538,8 +685,31 @@ export function ComprasView({
           onRemove={() => handleCartRemove(sheet.item)}
         />
       ) : null}
+      {sheet?.kind === "store" ? (
+        <BottomSheet title="Trocar loja" onClose={closeSheet}>
+          <div className="flex flex-col gap-4">
+            <StorePicker recentStores={recentStores} disabled={switching} onChange={setStoreChoice} />
+            {switchError ? <Alert kind="error">{switchError}</Alert> : null}
+            <Button full disabled={!storeChoice || switching} onClick={() => storeChoice && void handleSwitchStore(storeChoice)}>
+              {switching ? "Trocando..." : storeChoice ? `Trocar para ${storeChoice.storeName}` : "Escolha a loja"}
+            </Button>
+          </div>
+        </BottomSheet>
+      ) : null}
+      {sheet?.kind === "category" ? (
+        <CategorySheet item={sheet.item} onClose={closeSheet} onChoose={(cat) => void handleCategoryChange(sheet.item, cat)} />
+      ) : null}
 
       <TabBar />
     </>
+  );
+}
+
+function TagIcon() {
+  return (
+    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M20.59 13.41 11 3.83A2 2 0 0 0 9.59 3.24L4 3a1 1 0 0 0-1 1l.24 5.59a2 2 0 0 0 .59 1.41l9.58 9.58a2 2 0 0 0 2.83 0l4.35-4.35a2 2 0 0 0 0-2.82Z" />
+      <circle cx="7.5" cy="7.5" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
   );
 }

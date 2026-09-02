@@ -10,13 +10,9 @@ import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ChevronIcon } from "@/components/shopping-list/icons";
+import { summarizeStores, type PendingItem, type StoreSummary } from "@/components/precos/summarize";
 
-export type PendingItem = {
-  id: string;
-  name: string;
-  quantity: number;
-  unit: string | null;
-};
+export type { PendingItem } from "@/components/precos/summarize";
 
 type WhereToBuyProps = {
   listId: string;
@@ -27,15 +23,6 @@ type WhereToBuyProps = {
   /** Resultado de `rpc best_prices` (uma linha por item × loja). */
   rows: BestPriceRow[];
   loadError: string | null;
-};
-
-type StoreSummary = {
-  storeId: string;
-  name: string;
-  covered: number;
-  /** Soma de (melhor preço do item na loja × quantidade do item). */
-  sum: number;
-  qualifies: boolean;
 };
 
 type UpdateResult = {
@@ -110,58 +97,38 @@ function formatQuantity(quantity: number, unit: string | null): string | null {
   return unit ? `${q} ${unit}` : `${q}×`;
 }
 
-/** Quantidade usada na estimativa: 1 quando a lista não tem quantidade válida. */
-function effectiveQuantity(quantity: number | undefined): number {
-  return quantity !== undefined && Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
-}
-
-/**
- * Resumo por loja: para cada (item, loja) usa o melhor preço e multiplica pela quantidade do item.
- * Ordena: com cobertura ≥ 50% primeiro (menor soma), depois por cobertura, depois soma.
- */
-function summarizeStores(rows: BestPriceRow[], items: PendingItem[]): StoreSummary[] {
-  const total = items.length;
-  const qtyById = new Map(items.map((i) => [i.id, i.quantity]));
-
-  type Best = { storeId: string; storeName: string; itemId: string; price: number };
-  const bestByStoreItem = new Map<string, Best>();
-  for (const r of rows) {
-    if (!qtyById.has(r.list_item_id)) continue;
-    const price = Number(r.price);
-    if (!Number.isFinite(price)) continue;
-    const key = `${r.store_id} ${r.list_item_id}`;
-    const cur = bestByStoreItem.get(key);
-    if (!cur || price < cur.price) {
-      bestByStoreItem.set(key, { storeId: r.store_id, storeName: r.store_name, itemId: r.list_item_id, price });
-    }
-  }
-
-  const byStore = new Map<string, StoreSummary>();
-  for (const b of bestByStoreItem.values()) {
-    const s = byStore.get(b.storeId) ?? {
-      storeId: b.storeId,
-      name: b.storeName,
-      covered: 0,
-      sum: 0,
-      qualifies: false,
-    };
-    s.covered += 1;
-    s.sum += b.price * effectiveQuantity(qtyById.get(b.itemId));
-    byStore.set(b.storeId, s);
-  }
-
-  const list = [...byStore.values()];
-  for (const s of list) s.qualifies = total > 0 && s.covered * 2 >= total;
-  list.sort((a, b) => {
-    if (a.qualifies !== b.qualifies) return a.qualifies ? -1 : 1;
-    if (a.qualifies) return a.sum - b.sum || b.covered - a.covered;
-    return b.covered - a.covered || a.sum - b.sum;
-  });
-  return list;
-}
-
 function rowKey(itemId: string, storeId: string): string {
   return `${itemId}:${storeId}`;
+}
+
+function coverageLabel(s: { itensComPrecoReal: number; itensComparaveis: number; estimados: number }): string {
+  const base = `${s.itensComPrecoReal} de ${s.itensComparaveis} ${s.itensComparaveis === 1 ? "item" : "itens"} com preço real`;
+  if (s.estimados === 0) return base;
+  return `${base}, ${s.estimados} estimado${s.estimados === 1 ? "" : "s"}`;
+}
+
+function StoreRow({ store, muted }: { store: StoreSummary; muted?: boolean }) {
+  return (
+    <li
+      className={
+        "flex items-center gap-3 rounded-xl border px-3 py-2.5 " +
+        (muted
+          ? "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-800/60"
+          : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900")
+      }
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-base font-medium text-zinc-900 dark:text-zinc-100">{store.name}</span>
+        <span className="block text-xs text-zinc-500 dark:text-zinc-400">
+          {coverageLabel(store)}
+          {muted ? " · cobertura baixa" : null}
+        </span>
+      </span>
+      <span className="shrink-0 text-base font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+        {brl.format(store.total)}
+      </span>
+    </li>
+  );
 }
 
 const SMALL_BUTTON =
@@ -183,10 +150,12 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
   const [matchBusy, setMatchBusy] = useState<string | null>(null);
   const [matchError, setMatchError] = useState<{ key: string; message: string } | null>(null);
   const [refreshing, startRefresh] = useTransition();
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [winnerOpen, setWinnerOpen] = useState(false);
 
   const total = items.length;
 
-  const { stores, byItem, withPrice, withoutPrice } = useMemo(() => {
+  const { summary, byItem, withPrice, withoutPrice } = useMemo(() => {
     const byItem = new Map<string, BestPriceRow[]>();
     for (const r of rows) {
       const arr = byItem.get(r.list_item_id) ?? [];
@@ -198,10 +167,10 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
     }
     const withPrice = items.filter((i) => byItem.has(i.id));
     const withoutPrice = items.filter((i) => !byItem.has(i.id));
-    return { stores: summarizeStores(rows, items), byItem, withPrice, withoutPrice };
+    return { summary: summarizeStores(rows, items), byItem, withPrice, withoutPrice };
   }, [rows, items]);
 
-  const best = stores[0]?.qualifies ? stores[0] : null;
+  const { eligible, lowCoverage, best, split } = summary;
   const matchLocked = matchBusy !== null || refreshing;
 
   function toggle(id: string) {
@@ -354,7 +323,7 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
           <>
             <Card>
               <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Resumo por loja</p>
-              {stores.length === 0 ? (
+              {summary.stores.length === 0 ? (
                 <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
                   Ainda não há preços para os itens da lista. Toque em &quot;Atualizar preços&quot; ou importe um cupom.
                 </p>
@@ -362,52 +331,103 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
                 <>
                   {!best ? (
                     <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-                      Nenhuma loja cobre metade da lista ainda. Lojas com mais itens aparecem primeiro.
+                      Nenhuma loja cobre metade da lista com preço real ainda. Veja a cobertura de cada uma abaixo.
                     </p>
+                  ) : (
+                    <div className="mt-2 rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2.5 dark:border-emerald-800 dark:bg-emerald-950">
+                      <button
+                        type="button"
+                        onClick={() => best.estimados > 0 && setWinnerOpen((v) => !v)}
+                        aria-expanded={best.estimados > 0 ? winnerOpen : undefined}
+                        className="flex w-full items-center gap-3 text-left"
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-base font-medium text-emerald-900 dark:text-emerald-100">
+                            {best.name}
+                          </span>
+                          <span className="block text-xs text-emerald-800/80 dark:text-emerald-200/80">
+                            Melhor loja para a lista inteira · {coverageLabel(best)}
+                          </span>
+                        </span>
+                        <span className="shrink-0 text-base font-semibold tabular-nums text-emerald-800 dark:text-emerald-200">
+                          {brl.format(best.total)}
+                        </span>
+                        {best.estimados > 0 ? (
+                          <ChevronIcon
+                            className={`h-4 w-4 shrink-0 text-emerald-700 transition-transform dark:text-emerald-300 ${winnerOpen ? "rotate-180" : ""}`}
+                          />
+                        ) : null}
+                      </button>
+                      {winnerOpen && best.estimados > 0 ? (
+                        <p className="mt-1.5 text-xs text-emerald-800/90 dark:text-emerald-200/90">
+                          Estimados pela mediana: {best.estimadosNomes.join(", ")}.
+                        </p>
+                      ) : null}
+                    </div>
+                  )}
+
+                  {eligible.length > 1 ? (
+                    <ul className="mt-2 flex flex-col gap-2">
+                      {eligible.slice(1).map((s) => (
+                        <StoreRow key={s.storeId} store={s} />
+                      ))}
+                    </ul>
                   ) : null}
-                  <ul className="mt-2 flex flex-col gap-2">
-                    {stores.map((s) => {
-                      const isBest = best?.storeId === s.storeId;
-                      return (
-                        <li
-                          key={s.storeId}
-                          className={
-                            "flex items-center gap-3 rounded-xl border px-3 py-2.5 " +
-                            (isBest
-                              ? "border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950"
-                              : "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-800/60")
-                          }
-                        >
-                          <span className="min-w-0 flex-1">
-                            <span
-                              className={
-                                "block truncate text-base font-medium " +
-                                (isBest ? "text-emerald-900 dark:text-emerald-100" : "text-zinc-900 dark:text-zinc-100")
-                              }
-                            >
-                              {s.name}
-                            </span>
-                            <span className="block text-xs text-zinc-500 dark:text-zinc-400">
-                              {isBest ? "Melhor opção · " : null}
-                              {s.covered}/{total} {s.covered === 1 ? "item" : "itens"}
-                              {!s.qualifies ? " · cobre menos da metade" : null}
-                            </span>
+
+                  {lowCoverage.length > 0 ? (
+                    <div className="mt-3">
+                      <p className="px-0.5 text-[11px] uppercase tracking-wide text-zinc-400">Cobertura baixa</p>
+                      <ul className="mt-1 flex flex-col gap-2">
+                        {lowCoverage.map((s) => (
+                          <StoreRow key={s.storeId} store={s} muted />
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+
+                  {split ? (
+                    <div className="mt-3 rounded-xl border border-sky-300 bg-sky-50 px-3 py-2.5 dark:border-sky-800 dark:bg-sky-950">
+                      <button
+                        type="button"
+                        onClick={() => setSplitOpen((v) => !v)}
+                        aria-expanded={splitOpen}
+                        className="flex w-full items-center gap-3 text-left"
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-base font-medium text-sky-900 dark:text-sky-100">
+                            Dividir em 2 lojas
                           </span>
-                          <span
-                            className={
-                              "shrink-0 text-base font-semibold tabular-nums " +
-                              (isBest ? "text-emerald-800 dark:text-emerald-200" : "text-zinc-900 dark:text-zinc-100")
-                            }
-                          >
-                            {brl.format(s.sum)}
+                          <span className="block text-xs text-sky-800/80 dark:text-sky-200/80">
+                            {split.storeAName} + {split.storeBName} · economiza {brl.format(split.economia)} (
+                            {Math.round(split.economiaPercent * 100)}%)
                           </span>
-                        </li>
-                      );
-                    })}
-                  </ul>
+                        </span>
+                        <span className="shrink-0 text-base font-semibold tabular-nums text-sky-800 dark:text-sky-200">
+                          {brl.format(split.total)}
+                        </span>
+                        <ChevronIcon
+                          className={`h-4 w-4 shrink-0 text-sky-700 transition-transform dark:text-sky-300 ${splitOpen ? "rotate-180" : ""}`}
+                        />
+                      </button>
+                      {splitOpen ? (
+                        <div className="mt-2 flex flex-col gap-1 text-xs text-sky-900 dark:text-sky-100">
+                          <p>
+                            <span className="font-semibold">{split.storeAName}:</span>{" "}
+                            {split.itemsA.map((i) => i.name).join(", ") || "nenhum item"}
+                          </p>
+                          <p>
+                            <span className="font-semibold">{split.storeBName}:</span>{" "}
+                            {split.itemsB.map((i) => i.name).join(", ") || "nenhum item"}
+                          </p>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+
                   <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-                    Estimativa pela quantidade da lista: melhor preço de cada item na loja × quantidade, só dos itens que a
-                    loja cobre.
+                    Total = melhor preço real de cada item na loja × quantidade. &quot;Estimado&quot; é a mediana dos
+                    melhores preços do item nas outras lojas, usada quando a loja não tem preço real dele. Só lojas com 50%
+                    ou mais dos itens com preço real concorrem a melhor loja única.
                   </p>
                 </>
               )}
