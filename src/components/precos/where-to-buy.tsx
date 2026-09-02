@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useMemo, useState, useSyncExternalStore, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import type { BestPriceRow, PriceSource } from "@/lib/database.types";
+import type { BestPriceRow, MatchKind, PriceSource } from "@/lib/database.types";
 import { AppHeader } from "@/components/app-header";
 import { TabBar, TAB_BAR_PADDING_CLASS } from "@/components/nav/tab-bar";
 import { Alert } from "@/components/ui/alert";
@@ -33,11 +33,18 @@ type StoreSummary = {
   storeId: string;
   name: string;
   covered: number;
+  /** Soma de (melhor preço do item na loja × quantidade do item). */
   sum: number;
   qualifies: boolean;
 };
 
-type UpdateResult = { itens: number; observacoes: number; falhas: string[] };
+type UpdateResult = {
+  itens: number;
+  observacoes: number;
+  correspondencias: number;
+  semJuiz: boolean;
+  falhas: string[];
+};
 
 const brl = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 
@@ -50,6 +57,28 @@ const SOURCE_LABEL: Record<PriceSource, string> = {
 
 function sourceLabel(source: string): string {
   return SOURCE_LABEL[source as PriceSource] ?? source;
+}
+
+const BADGE_GREEN = "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200";
+const BADGE_AMBER = "bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200";
+
+const MATCH_BADGE: Record<MatchKind, { label: string; className: string }> = {
+  user: { label: "confirmado por você", className: BADGE_GREEN },
+  llm: { label: "verificado por IA", className: BADGE_GREEN },
+  gtin: { label: "código de barras", className: BADGE_GREEN },
+  product: { label: "código de barras", className: BADGE_GREEN },
+  name: { label: "por nome (conferir)", className: BADGE_AMBER },
+};
+
+function MatchBadge({ kind }: { kind: MatchKind }) {
+  const badge = MATCH_BADGE[kind] ?? MATCH_BADGE.name;
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-full px-1.5 py-px text-[10px] font-medium leading-4 ${badge.className}`}
+    >
+      {badge.label}
+    </span>
+  );
 }
 
 // Relógio em minutos via useSyncExternalStore: no servidor é null (sem "há X" no HTML),
@@ -80,21 +109,46 @@ function formatQuantity(quantity: number, unit: string | null): string | null {
   return unit ? `${q} ${unit}` : `${q}×`;
 }
 
-/** Ordena lojas: com cobertura ≥ 50% primeiro (menor soma), depois por cobertura, depois soma. */
-function summarizeStores(rows: BestPriceRow[], total: number): StoreSummary[] {
-  const byStore = new Map<string, StoreSummary>();
+/** Quantidade usada na estimativa: 1 quando a lista não tem quantidade válida. */
+function effectiveQuantity(quantity: number | undefined): number {
+  return quantity !== undefined && Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+}
+
+/**
+ * Resumo por loja: para cada (item, loja) usa o melhor preço e multiplica pela quantidade do item.
+ * Ordena: com cobertura ≥ 50% primeiro (menor soma), depois por cobertura, depois soma.
+ */
+function summarizeStores(rows: BestPriceRow[], items: PendingItem[]): StoreSummary[] {
+  const total = items.length;
+  const qtyById = new Map(items.map((i) => [i.id, i.quantity]));
+
+  type Best = { storeId: string; storeName: string; itemId: string; price: number };
+  const bestByStoreItem = new Map<string, Best>();
   for (const r of rows) {
-    const s = byStore.get(r.store_id) ?? {
-      storeId: r.store_id,
-      name: r.store_name,
+    if (!qtyById.has(r.list_item_id)) continue;
+    const price = Number(r.price);
+    if (!Number.isFinite(price)) continue;
+    const key = `${r.store_id} ${r.list_item_id}`;
+    const cur = bestByStoreItem.get(key);
+    if (!cur || price < cur.price) {
+      bestByStoreItem.set(key, { storeId: r.store_id, storeName: r.store_name, itemId: r.list_item_id, price });
+    }
+  }
+
+  const byStore = new Map<string, StoreSummary>();
+  for (const b of bestByStoreItem.values()) {
+    const s = byStore.get(b.storeId) ?? {
+      storeId: b.storeId,
+      name: b.storeName,
       covered: 0,
       sum: 0,
       qualifies: false,
     };
     s.covered += 1;
-    s.sum += Number(r.price);
-    byStore.set(r.store_id, s);
+    s.sum += b.price * effectiveQuantity(qtyById.get(b.itemId));
+    byStore.set(b.storeId, s);
   }
+
   const list = [...byStore.values()];
   for (const s of list) s.qualifies = total > 0 && s.covered * 2 >= total;
   list.sort((a, b) => {
@@ -105,6 +159,18 @@ function summarizeStores(rows: BestPriceRow[], total: number): StoreSummary[] {
   return list;
 }
 
+function rowKey(itemId: string, storeId: string): string {
+  return `${itemId}:${storeId}`;
+}
+
+const SMALL_BUTTON =
+  "inline-flex min-h-9 items-center justify-center rounded-lg border px-2.5 text-xs font-medium transition-colors " +
+  "disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 active:scale-[0.98] select-none";
+const SMALL_BUTTON_NEUTRAL =
+  "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800";
+const SMALL_BUTTON_POSITIVE =
+  "border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 dark:border-emerald-800 dark:bg-zinc-900 dark:text-emerald-300 dark:hover:bg-emerald-950";
+
 export function WhereToBuy({ listId, householdName, hasLocation, items, rows, loadError }: WhereToBuyProps) {
   const router = useRouter();
   const minute = useSyncExternalStore(subscribeMinute, getMinute, getServerMinute);
@@ -113,6 +179,9 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateResult, setUpdateResult] = useState<UpdateResult | null>(null);
+  const [matchBusy, setMatchBusy] = useState<string | null>(null);
+  const [matchError, setMatchError] = useState<{ key: string; message: string } | null>(null);
+  const [refreshing, startRefresh] = useTransition();
 
   const total = items.length;
 
@@ -128,10 +197,11 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
     }
     const withPrice = items.filter((i) => byItem.has(i.id));
     const withoutPrice = items.filter((i) => !byItem.has(i.id));
-    return { stores: summarizeStores(rows, total), byItem, withPrice, withoutPrice };
-  }, [rows, items, total]);
+    return { stores: summarizeStores(rows, items), byItem, withPrice, withoutPrice };
+  }, [rows, items]);
 
   const best = stores[0]?.qualifies ? stores[0] : null;
+  const matchLocked = matchBusy !== null || refreshing;
 
   function toggle(id: string) {
     setExpanded((prev) => {
@@ -165,6 +235,8 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
       setUpdateResult({
         itens: payload.itens ?? 0,
         observacoes: payload.observacoes ?? 0,
+        correspondencias: payload.correspondencias ?? 0,
+        semJuiz: payload.semJuiz === true,
         falhas: payload.falhas ?? [],
       });
       router.refresh();
@@ -172,6 +244,39 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
       setUpdateError("Sem conexão com o servidor. Verifique sua internet e tente de novo.");
     } finally {
       setUpdating(false);
+    }
+  }
+
+  async function handleMatch(item: PendingItem, offer: BestPriceRow, isMatch: boolean) {
+    const key = rowKey(item.id, offer.store_id);
+    setMatchBusy(key);
+    setMatchError(null);
+    try {
+      const res = await fetch("/api/precos/match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          itemName: item.name,
+          description: offer.description,
+          gtin: offer.gtin,
+          isMatch,
+        }),
+      });
+      let payload: { ok?: boolean; error?: string } = {};
+      try {
+        payload = await res.json();
+      } catch {
+        // Corpo vazio ou não-JSON: tratado abaixo pelo status.
+      }
+      if (!res.ok || payload.ok === false) {
+        setMatchError({ key, message: payload.error || "Não foi possível salvar a correção. Tente de novo." });
+        return;
+      }
+      startRefresh(() => router.refresh());
+    } catch {
+      setMatchError({ key, message: "Sem conexão com o servidor. Verifique sua internet e tente de novo." });
+    } finally {
+      setMatchBusy(null);
     }
   }
 
@@ -197,20 +302,27 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
           </Button>
           {updating ? (
             <p role="status" className="text-center text-sm text-zinc-500 dark:text-zinc-400">
-              Consultando o Preço da Hora para cada item. Isso pode levar até 1 minuto.
+              Consultando o Preço da Hora e verificando os produtos. Isso pode levar até 2 minutos.
             </p>
           ) : null}
           {updateError ? <Alert kind="error">{updateError}</Alert> : null}
           {updateResult ? (
             <Alert kind={updateResult.falhas.length > 0 ? "info" : "success"}>
               {updateResult.itens} {updateResult.itens === 1 ? "item consultado" : "itens consultados"},{" "}
-              {updateResult.observacoes} {updateResult.observacoes === 1 ? "preço novo" : "preços novos"}.
+              {updateResult.observacoes} {updateResult.observacoes === 1 ? "preço novo" : "preços novos"},{" "}
+              {updateResult.correspondencias}{" "}
+              {updateResult.correspondencias === 1 ? "correspondência verificada" : "correspondências verificadas"}.
               {updateResult.falhas.length > 0 ? (
                 <>
                   {" "}
                   Sem resultado para: {updateResult.falhas.join(", ")}.
                 </>
               ) : null}
+            </Alert>
+          ) : null}
+          {updateResult?.semJuiz ? (
+            <Alert kind="info">
+              A verificação por IA não estava disponível; os resultados foram cruzados só por nome.
             </Alert>
           ) : null}
         </Card>
@@ -285,7 +397,8 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
                     })}
                   </ul>
                   <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-                    Soma dos preços unitários dos itens que cada loja cobre.
+                    Estimativa pela quantidade da lista: melhor preço de cada item na loja × quantidade, só dos itens que a
+                    loja cobre.
                   </p>
                 </>
               )}
@@ -300,7 +413,6 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
                   {withPrice.map((item) => {
                     const offers = byItem.get(item.id) ?? [];
                     const top = offers[0];
-                    const others = offers.slice(1);
                     const open = expanded.has(item.id);
                     const qty = formatQuantity(item.quantity, item.unit);
                     return (
@@ -308,51 +420,91 @@ export function WhereToBuy({ listId, householdName, hasLocation, items, rows, lo
                         <button
                           type="button"
                           onClick={() => toggle(item.id)}
-                          disabled={others.length === 0}
-                          aria-expanded={others.length > 0 ? open : undefined}
-                          className="flex min-h-14 w-full items-center gap-3 px-3 py-2 text-left active:bg-zinc-50 disabled:cursor-default dark:active:bg-zinc-800"
+                          aria-expanded={open}
+                          className="flex min-h-14 w-full items-center gap-3 px-3 py-2 text-left active:bg-zinc-50 dark:active:bg-zinc-800"
                         >
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-base text-zinc-900 dark:text-zinc-100">
                               {item.name}
                               {qty ? <span className="ml-1.5 text-sm text-zinc-500 dark:text-zinc-400">{qty}</span> : null}
                             </span>
-                            <span className="mt-0.5 block truncate text-xs text-zinc-500 dark:text-zinc-400">
-                              {top.store_name} · {sourceLabel(top.source)}
-                              {now !== null ? ` · ${relativeTime(top.observed_at, now)}` : null}
+                            <span className="mt-0.5 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                              <span className="min-w-0 truncate">
+                                {top.store_name} · {sourceLabel(top.source)}
+                                {now !== null ? ` · ${relativeTime(top.observed_at, now)}` : null}
+                              </span>
+                              <MatchBadge kind={top.match_kind} />
                             </span>
                           </span>
                           <span className="shrink-0 text-base font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">
                             {brl.format(Number(top.price))}
                           </span>
-                          {others.length > 0 ? (
-                            <ChevronIcon
-                              className={`h-4 w-4 shrink-0 text-zinc-400 transition-transform ${open ? "rotate-180" : ""}`}
-                            />
-                          ) : (
-                            <span className="w-4 shrink-0" aria-hidden />
-                          )}
+                          <ChevronIcon
+                            className={`h-4 w-4 shrink-0 text-zinc-400 transition-transform ${open ? "rotate-180" : ""}`}
+                          />
                         </button>
-                        {open && others.length > 0 ? (
+                        {open ? (
                           <ul className="bg-zinc-50 px-3 pb-2 dark:bg-zinc-800/60">
-                            <li className="px-1 pt-1 text-[11px] uppercase tracking-wide text-zinc-400">Outras lojas</li>
-                            {others.map((o) => (
-                              <li key={o.store_id} className="flex min-h-10 items-center gap-3 px-1 text-sm">
-                                <span className="min-w-0 flex-1">
-                                  <span className="block truncate text-zinc-800 dark:text-zinc-200">{o.store_name}</span>
-                                  <span className="block truncate text-xs text-zinc-500 dark:text-zinc-400">
-                                    {sourceLabel(o.source)}
-                                    {now !== null ? ` · ${relativeTime(o.observed_at, now)}` : null}
-                                  </span>
-                                </span>
-                                <span className="shrink-0 font-medium tabular-nums text-zinc-700 dark:text-zinc-300">
-                                  {brl.format(Number(o.price))}
-                                </span>
-                              </li>
-                            ))}
-                            <li className="px-1 pt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                              Encontrado como: <span className="italic">{top.description}</span>
+                            <li className="px-1 pt-1 text-[11px] uppercase tracking-wide text-zinc-400">
+                              {offers.length === 1 ? "Loja" : "Lojas"}
                             </li>
+                            {offers.map((o) => {
+                              const key = rowKey(item.id, o.store_id);
+                              const busy = matchBusy === key;
+                              const error = matchError?.key === key ? matchError.message : null;
+                              return (
+                                <li
+                                  key={o.store_id}
+                                  className="flex flex-col gap-1.5 border-b border-zinc-200/70 px-1 py-2 last:border-b-0 dark:border-zinc-700/60"
+                                >
+                                  <div className="flex items-center gap-3 text-sm">
+                                    <span className="min-w-0 flex-1">
+                                      <span className="block truncate text-zinc-800 dark:text-zinc-200">{o.store_name}</span>
+                                      <span className="block truncate text-xs text-zinc-500 dark:text-zinc-400">
+                                        {sourceLabel(o.source)}
+                                        {now !== null ? ` · ${relativeTime(o.observed_at, now)}` : null}
+                                      </span>
+                                    </span>
+                                    <span className="shrink-0 font-medium tabular-nums text-zinc-700 dark:text-zinc-300">
+                                      {brl.format(Number(o.price))}
+                                    </span>
+                                  </div>
+                                  <p className="text-xs text-zinc-600 dark:text-zinc-400">
+                                    Encontrado como: <span className="italic">{o.description}</span>
+                                  </p>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <MatchBadge kind={o.match_kind} />
+                                    {o.match_kind === "user" ? null : (
+                                      <span className="ml-auto flex shrink-0 items-center gap-2">
+                                        {o.match_kind === "name" ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleMatch(item, o, true)}
+                                            disabled={matchLocked}
+                                            className={`${SMALL_BUTTON} ${SMALL_BUTTON_POSITIVE}`}
+                                          >
+                                            {busy ? "Salvando..." : "É esse sim"}
+                                          </button>
+                                        ) : null}
+                                        <button
+                                          type="button"
+                                          onClick={() => handleMatch(item, o, false)}
+                                          disabled={matchLocked}
+                                          className={`${SMALL_BUTTON} ${SMALL_BUTTON_NEUTRAL}`}
+                                        >
+                                          {busy ? "Salvando..." : "Não é esse produto"}
+                                        </button>
+                                      </span>
+                                    )}
+                                  </div>
+                                  {error ? (
+                                    <p role="alert" className="text-xs text-red-700 dark:text-red-400">
+                                      {error}
+                                    </p>
+                                  ) : null}
+                                </li>
+                              );
+                            })}
                           </ul>
                         ) : null}
                       </li>
