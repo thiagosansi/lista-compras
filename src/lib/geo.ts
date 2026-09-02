@@ -23,11 +23,20 @@ export function nearest<T extends { lat: number | null; lng: number | null }>(
   origin: LatLng,
   candidates: T[],
 ): { item: T; distanceKm: number } | null {
-  let best: { item: T; distanceKm: number } | null = null;
+  return nearestN(origin, candidates, 1)[0] ?? null;
+}
+
+/** Retorna as `n` candidatas mais próximas de `origin` (ignora as sem coordenadas), ordenadas por distância crescente. */
+export function nearestN<T extends { lat: number | null; lng: number | null }>(
+  origin: LatLng,
+  candidates: T[],
+  n: number,
+): { item: T; distanceKm: number }[] {
+  const withDistance: { item: T; distanceKm: number }[] = [];
   for (const c of candidates) {
     if (c.lat == null || c.lng == null) continue;
-    const d = haversineKm(origin, { lat: c.lat, lng: c.lng });
-    if (!best || d < best.distanceKm) best = { item: c, distanceKm: d };
+    withDistance.push({ item: c, distanceKm: haversineKm(origin, { lat: c.lat, lng: c.lng }) });
   }
-  return best;
+  withDistance.sort((a, b) => a.distanceKm - b.distanceKm);
+  return withDistance.slice(0, n);
 }

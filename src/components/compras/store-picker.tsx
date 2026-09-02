@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { nearest } from "@/lib/geo";
+import { nearestN } from "@/lib/geo";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,11 +20,47 @@ export type StoreChoice = { storeId: string | null; storeName: string };
 const SEARCH_MIN_CHARS = 2;
 const SEARCH_DEBOUNCE_MS = 250;
 const SEARCH_LIMIT = 10;
+const NEAREST_LIMIT = 10;
 
 function geoErrorMessage(err: GeolocationPositionError): string {
   if (err.code === err.PERMISSION_DENIED) return "Permissão de localização negada. Escolha a loja manualmente.";
   if (err.code === err.TIMEOUT) return "Não foi possível obter sua localização a tempo. Tente de novo.";
   return "Não foi possível obter sua localização.";
+}
+
+/** Formata distância em km no padrão pt-BR com uma casa decimal (ex.: "1,2 km"). */
+function formatKm(km: number): string {
+  return `${km.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} km`;
+}
+
+/** Linha de loja reutilizada nos resultados de busca por nome e na lista de mais próximas. */
+function StoreResultRow({
+  store,
+  km,
+  onClick,
+  disabled,
+}: {
+  store: RecentStore;
+  km?: number;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <li className="border-b border-zinc-100 last:border-b-0 dark:border-zinc-800">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className="flex min-h-11 w-full items-center justify-between gap-2 px-3 py-1.5 text-left hover:bg-zinc-50 disabled:opacity-50 dark:hover:bg-zinc-800"
+      >
+        <span className="flex min-w-0 flex-col items-start">
+          <span className="truncate text-sm text-zinc-900 dark:text-zinc-100">{store.name}</span>
+          {store.address ? <span className="truncate text-xs text-zinc-500 dark:text-zinc-400">{store.address}</span> : null}
+        </span>
+        {km != null ? <span className="shrink-0 text-xs text-zinc-500 dark:text-zinc-400">{formatKm(km)}</span> : null}
+      </button>
+    </li>
+  );
 }
 
 type StorePickerProps = {
@@ -37,8 +73,9 @@ type StorePickerProps = {
 /**
  * Seletor de loja reutilizável (tela inicial e "Trocar loja" na sessão aberta):
  * lojas recentes, busca por nome em `stores` (debounce, min. 2 caracteres, até 10
- * resultados), "Loja mais próxima" (geolocalização) e texto livre — reaproveitado por
- * nome exato ou criado sem CNPJ quando a loja é confirmada pelo chamador.
+ * resultados), "Lojas mais próximas" (geolocalização, lista das 10 mais próximas com
+ * distância) e texto livre — reaproveitado por nome exato ou criado sem CNPJ quando a
+ * loja é confirmada pelo chamador.
  */
 export function StorePicker({ recentStores, disabled, onChange }: StorePickerProps) {
   const inputId = useId();
@@ -48,6 +85,7 @@ export function StorePicker({ recentStores, disabled, onChange }: StorePickerPro
   const [searching, setSearching] = useState(false);
   const [locating, setLocating] = useState(false);
   const [geoMessage, setGeoMessage] = useState<string | null>(null);
+  const [nearestOptions, setNearestOptions] = useState<{ store: RecentStore; km: number }[]>([]);
   const [nearestInfo, setNearestInfo] = useState<{ store: RecentStore; km: number } | null>(null);
   const searchSeq = useRef(0);
   const debounceRef = useRef<number | null>(null);
@@ -89,11 +127,18 @@ export function StorePicker({ recentStores, disabled, onChange }: StorePickerPro
     setQuery(store?.name ?? "");
     setResults([]);
     setSearching(false);
+    setNearestOptions([]);
+    setNearestInfo(null);
     onChange(store ? { storeId: store.id, storeName: store.name } : null);
   }
 
   function pickRecent(store: RecentStore) {
     selectStore(selected?.id === store.id ? null : store);
+  }
+
+  function pickNearest(store: RecentStore, km: number) {
+    selectStore(store);
+    setNearestInfo({ store, km });
   }
 
   function handleQueryChange(value: string) {
@@ -106,6 +151,8 @@ export function StorePicker({ recentStores, disabled, onChange }: StorePickerPro
 
   function locate() {
     setGeoMessage(null);
+    setNearestOptions([]);
+    setNearestInfo(null);
     if (typeof navigator === "undefined" || !navigator.geolocation) {
       setGeoMessage("Seu navegador não suporta geolocalização.");
       return;
@@ -126,13 +173,16 @@ export function StorePicker({ recentStores, disabled, onChange }: StorePickerPro
           setGeoMessage("Não foi possível carregar as lojas.");
           return;
         }
-        const best = nearest(origin, [...recentStores, ...(data ?? [])]);
-        if (!best) {
+        const byId = new Map<string, RecentStore>();
+        for (const s of [...recentStores, ...(data ?? [])]) {
+          if (!byId.has(s.id)) byId.set(s.id, s);
+        }
+        const closest = nearestN(origin, [...byId.values()], NEAREST_LIMIT);
+        if (closest.length === 0) {
           setGeoMessage("Nenhuma loja com localização conhecida ainda. Escolha manualmente.");
           return;
         }
-        setNearestInfo({ store: best.item, km: best.distanceKm });
-        selectStore(best.item);
+        setNearestOptions(closest.map(({ item, distanceKm }) => ({ store: item, km: distanceKm })));
       },
       (err) => {
         setLocating(false);
@@ -187,17 +237,7 @@ export function StorePicker({ recentStores, disabled, onChange }: StorePickerPro
         {!selected && results.length > 0 ? (
           <ul className="overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
             {results.map((s) => (
-              <li key={s.id} className="border-b border-zinc-100 last:border-b-0 dark:border-zinc-800">
-                <button
-                  type="button"
-                  onClick={() => selectStore(s)}
-                  disabled={disabled}
-                  className="flex min-h-11 w-full flex-col items-start px-3 py-1.5 text-left hover:bg-zinc-50 disabled:opacity-50 dark:hover:bg-zinc-800"
-                >
-                  <span className="truncate text-sm text-zinc-900 dark:text-zinc-100">{s.name}</span>
-                  {s.address ? <span className="truncate text-xs text-zinc-500 dark:text-zinc-400">{s.address}</span> : null}
-                </button>
-              </li>
+              <StoreResultRow key={s.id} store={s} onClick={() => selectStore(s)} disabled={disabled} />
             ))}
           </ul>
         ) : null}
@@ -206,11 +246,18 @@ export function StorePicker({ recentStores, disabled, onChange }: StorePickerPro
       <div className="flex flex-col gap-1">
         <Button variant="secondary" full onClick={locate} disabled={locating || disabled}>
           <PinIcon />
-          {locating ? "Localizando..." : "Loja mais próxima"}
+          {locating ? "Localizando..." : "Lojas mais próximas"}
         </Button>
+        {!selected && nearestOptions.length > 0 ? (
+          <ul className="overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+            {nearestOptions.map(({ store, km }) => (
+              <StoreResultRow key={store.id} store={store} km={km} onClick={() => pickNearest(store, km)} disabled={disabled} />
+            ))}
+          </ul>
+        ) : null}
         {nearestInfo && selected?.id === nearestInfo.store.id ? (
           <p className="text-center text-xs text-zinc-500 dark:text-zinc-400">
-            {nearestInfo.store.name} · {nearestInfo.km < 1 ? `${Math.round(nearestInfo.km * 1000)} m` : `${nearestInfo.km.toFixed(1)} km`}
+            {nearestInfo.store.name} · {formatKm(nearestInfo.km)}
           </p>
         ) : null}
         {geoMessage ? <Alert kind="info">{geoMessage}</Alert> : null}
