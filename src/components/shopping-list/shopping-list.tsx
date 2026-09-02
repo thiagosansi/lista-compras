@@ -2,15 +2,15 @@
 
 import { normalizeName } from "@/lib/normalize";
 
-import Link from "next/link";
 import { useCallback, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { ListItem } from "@/lib/database.types";
 import { useListItems, upsertItem, TEMP_ID_PREFIX } from "@/lib/hooks/use-list-items";
 import { AppHeader } from "@/components/app-header";
+import { TabBar } from "@/components/nav/tab-bar";
 import { AddItemBar } from "./add-item-bar";
 import { ItemRow } from "./item-row";
-import { ChevronIcon, HomeIcon } from "./icons";
+import { ChevronIcon } from "./icons";
 
 type ShoppingListProps = {
   listId: string;
@@ -130,21 +130,10 @@ export function ShoppingList({ listId, listName, householdName, currentUserId, m
 
   return (
     <>
-      <AppHeader
-        title={householdName}
-        subtitle={listName}
-        right={
-          <Link
-            href="/casa"
-            aria-label="Minha casa"
-            className="flex h-11 w-11 items-center justify-center rounded-xl text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-          >
-            <HomeIcon />
-          </Link>
-        }
-      />
+      <AppHeader title={householdName} subtitle={listName} />
 
-      <main className="mx-auto w-full max-w-md flex-1 px-3 pb-[calc(6rem+env(safe-area-inset-bottom))] pt-3">
+      {/* Rodapé: barra de adicionar (~3.75rem) + tab bar (3.5rem) + área segura. */}
+      <main className="mx-auto w-full max-w-md flex-1 px-3 pb-[calc(9rem+env(safe-area-inset-bottom))] pt-3">
         {error ? (
           <p role="alert" className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
             {error}
@@ -223,6 +212,7 @@ export function ShoppingList({ listId, listName, householdName, currentUserId, m
       </main>
 
       <AddItemBar onAdd={handleAdd} />
+      <TabBar />
     </>
   );
 }

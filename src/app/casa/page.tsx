@@ -21,7 +21,7 @@ export default async function HouseholdPage() {
   const householdId = membership.household_id;
 
   const [{ data: household }, { data: memberRows }] = await Promise.all([
-    supabase.from("households").select("name, invite_code").eq("id", householdId).single(),
+    supabase.from("households").select("id, name, invite_code, lat, lng, address").eq("id", householdId).single(),
     supabase
       .from("household_members")
       .select("user_id, role, joined_at")
@@ -49,5 +49,15 @@ export default async function HouseholdPage() {
     isCurrentUser: r.user_id === user.id,
   }));
 
-  return <HouseholdView householdName={household.name} inviteCode={household.invite_code} members={members} />;
+  return (
+    <HouseholdView
+      householdId={household.id}
+      householdName={household.name}
+      inviteCode={household.invite_code}
+      members={members}
+      lat={household.lat}
+      lng={household.lng}
+      address={household.address}
+    />
+  );
 }

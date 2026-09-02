@@ -1,13 +1,13 @@
 "use client";
 
-import Link from "next/link";
 import { useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { AppHeader } from "@/components/app-header";
+import { TabBar, TAB_BAR_PADDING_CLASS } from "@/components/nav/tab-bar";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { ArrowLeftIcon } from "@/components/shopping-list/icons";
+import { LocationCard } from "./location-card";
 
 export type HouseholdMember = {
   userId: string;
@@ -21,12 +21,16 @@ const hasShareApi = () => typeof navigator.share === "function";
 const serverHasShareApi = () => false;
 
 type HouseholdViewProps = {
+  householdId: string;
   householdName: string;
   inviteCode: string;
   members: HouseholdMember[];
+  lat: number | null;
+  lng: number | null;
+  address: string | null;
 };
 
-export function HouseholdView({ householdName, inviteCode, members }: HouseholdViewProps) {
+export function HouseholdView({ householdId, householdName, inviteCode, members, lat, lng, address }: HouseholdViewProps) {
   const router = useRouter();
   const [copied, setCopied] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -61,20 +65,9 @@ export function HouseholdView({ householdName, inviteCode, members }: HouseholdV
 
   return (
     <>
-      <AppHeader
-        title="Minha casa"
-        left={
-          <Link
-            href="/lista"
-            aria-label="Voltar para a lista"
-            className="flex h-11 w-11 items-center justify-center rounded-xl text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-          >
-            <ArrowLeftIcon />
-          </Link>
-        }
-      />
+      <AppHeader title="Minha casa" />
 
-      <main className="mx-auto flex w-full max-w-md flex-1 flex-col gap-4 px-3 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-3">
+      <main className={`mx-auto flex w-full max-w-md flex-1 flex-col gap-4 px-3 pt-3 ${TAB_BAR_PADDING_CLASS}`}>
         <Card>
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Casa</p>
           <h2 className="mt-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">{householdName}</h2>
@@ -104,6 +97,8 @@ export function HouseholdView({ householdName, inviteCode, members }: HouseholdV
             ) : null}
           </div>
         </Card>
+
+        <LocationCard householdId={householdId} lat={lat} lng={lng} address={address} />
 
         <Card>
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -141,6 +136,8 @@ export function HouseholdView({ householdName, inviteCode, members }: HouseholdV
           {signingOut ? "Saindo..." : "Sair da conta"}
         </Button>
       </main>
+
+      <TabBar />
     </>
   );
 }

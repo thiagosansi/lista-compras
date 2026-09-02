@@ -16,8 +16,10 @@ import type { NextConfig } from "next";
 const isDev = process.env.NODE_ENV === "development";
 const isTurbopack = Boolean(process.env.TURBOPACK);
 const pwaDisabled = process.env.DISABLE_PWA === "1";
+// Só o `next build` deve falhar; `next typegen`, `next lint` etc. também carregam a config.
+const isBuild = process.argv.includes("build");
 
-if (!isDev && isTurbopack && !pwaDisabled) {
+if (isBuild && !isDev && isTurbopack && !pwaDisabled) {
   throw new Error(
     "[PWA] O service worker (Serwist) precisa do webpack. Rode `next build --webpack` " +
       "(ajuste o script `build` no package.json) ou defina DISABLE_PWA=1 para buildar sem PWA.",

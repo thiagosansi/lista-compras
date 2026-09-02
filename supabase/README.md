@@ -1,11 +1,14 @@
 # Supabase — banco de dados
 
-Schema em `migrations/0001_init.sql` (espelhado por `src/lib/database.types.ts`).
-A migration é idempotente: pode ser aplicada mais de uma vez sem quebrar.
+Schema em `migrations/*.sql` (espelhado por `src/lib/database.types.ts`).
+As migrations são idempotentes: podem ser aplicadas mais de uma vez sem quebrar. Aplique em ordem:
 
-## Aplicar a migration
+1. `0001_init.sql` — Fase 1 (households, listas, itens, RLS, realtime).
+2. `0002_precos.sql` — Fases 2/3 (histórico de preços). Requer a 0001 já aplicada.
 
-**Opção A — Dashboard (mais simples):** abra o projeto no [Supabase Dashboard](https://supabase.com/dashboard) → *SQL Editor* → cole o conteúdo de `migrations/0001_init.sql` → *Run*.
+## Aplicar as migrations
+
+**Opção A — Dashboard (mais simples):** abra o projeto no [Supabase Dashboard](https://supabase.com/dashboard) → *SQL Editor* → cole o conteúdo de `migrations/0001_init.sql` → *Run*; repita com `migrations/0002_precos.sql`.
 
 **Opção B — CLI:**
 
@@ -21,6 +24,14 @@ Em *Authentication → Providers → Email*:
 
 - **Confirm email**: pode ficar **ligado** (o Supabase envia 1 email por cadastro e o usuário só entra depois de confirmar; a tela `/login` avisa isso) ou **desligado** para simplificar o teste entre duas pessoas. Qualquer um dos dois funciona com o app.
 - O nome informado no cadastro vai em `options.data.display_name` e vira `profiles.display_name` via trigger em `auth.users`.
+
+## Preços (migration 0002)
+
+- Habilita as extensões `unaccent` e `pg_trgm` no schema `extensions` (padrão do Supabase; *Database → Extensions* também serve, mas a migration já faz isso).
+- Cria `public.immutable_unaccent` e `public.normalize_name` (espelho de `src/lib/normalize.ts`), usadas em colunas `normalized_name` *generated stored* de `products`, `price_observations` e `list_items`.
+- Tabelas `stores` e `products` são catálogo compartilhado entre todos os households (qualquer usuário logado lê/insere/atualiza, ninguém apaga). `receipts`, `receipt_items` e `price_observations` seguem `is_household_member`.
+- Índice único parcial em `price_observations` (`where source = 'precodahora'`) evita duplicar leituras do Preço da Hora ao "Atualizar preços" de novo.
+- RPC `best_prices(p_list_id, p_max_age_hours default 336)` roda como *security invoker*: a RLS se aplica, então só membros do household da lista recebem linhas. Usa `extensions.similarity` qualificado (as funções do `pg_trgm` não estão no `search_path` padrão do Supabase).
 
 ## Realtime
 
