@@ -44,6 +44,14 @@ export function HomeIcon({ className = "h-5 w-5" }: IconProps) {
   );
 }
 
+export function BarcodeIcon({ className = "h-3.5 w-3.5" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+      <path d="M3 5v14M7 5v14M10 5v14M14 5v14M17 5v14M21 5v14" />
+    </svg>
+  );
+}
+
 export function ArrowLeftIcon({ className = "h-5 w-5" }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>

@@ -19,6 +19,16 @@ function ListIcon({ className = "h-6 w-6" }: IconProps) {
   );
 }
 
+function CartIcon({ className = "h-6 w-6" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M2 3h2.5l2.4 12.2a1 1 0 0 0 1 .8h9.8a1 1 0 0 0 1-.8L21 7H6" />
+      <circle cx="9" cy="20" r="1.5" />
+      <circle cx="17" cy="20" r="1.5" />
+    </svg>
+  );
+}
+
 function TagIcon({ className = "h-6 w-6" }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -48,6 +58,7 @@ function HomeIcon({ className = "h-6 w-6" }: IconProps) {
 
 const TABS = [
   { href: "/lista", label: "Lista", Icon: ListIcon },
+  { href: "/compras", label: "Compras", Icon: CartIcon },
   { href: "/onde-comprar", label: "Onde comprar", Icon: TagIcon },
   { href: "/cupom", label: "Cupom", Icon: ReceiptIcon },
   { href: "/casa", label: "Casa", Icon: HomeIcon },
@@ -75,14 +86,15 @@ export function TabBar() {
                 href={href}
                 aria-current={active ? "page" : undefined}
                 className={
-                  "flex flex-1 flex-col items-center justify-center gap-0.5 rounded-lg px-1 text-[11px] font-medium leading-none transition-colors select-none " +
+                  // 5 abas em 360px: ~72px cada; padding mínimo e tracking-tight para "Onde comprar" caber.
+                  "flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-lg px-0.5 text-[11px] font-medium leading-none tracking-tight transition-colors select-none " +
                   (active
                     ? "text-emerald-600 dark:text-emerald-400"
                     : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200")
                 }
               >
                 <Icon className={active ? "h-6 w-6" : "h-6 w-6 opacity-90"} />
-                <span className="truncate">{label}</span>
+                <span className="max-w-full truncate">{label}</span>
               </Link>
             </li>
           );

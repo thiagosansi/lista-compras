@@ -1,7 +1,7 @@
 "use client";
 
 import type { ListItem } from "@/lib/database.types";
-import { CheckIcon, TrashIcon } from "./icons";
+import { BarcodeIcon, CheckIcon, TrashIcon } from "./icons";
 
 type ItemRowProps = {
   item: ListItem;
@@ -61,6 +61,17 @@ export function ItemRow({ item, addedByName, pending, onToggle, onDelete }: Item
                 {addedByName}
               </span>
             ) : null}
+            {item.gtin ? (
+              <span
+                className="inline-flex items-center gap-0.5 rounded-full border border-zinc-200 px-1.5 py-px text-[10px] font-medium text-zinc-500 dark:border-zinc-700 dark:text-zinc-400"
+                title={`Código de barras ${item.gtin}`}
+                aria-label={`Código de barras ${item.gtin}`}
+              >
+                <BarcodeIcon className="h-3 w-3" />
+                <span aria-hidden>código</span>
+              </span>
+            ) : null}
+            {item.category ? <span className="truncate">{item.category}</span> : null}
             {item.note ? <span className="truncate">{item.note}</span> : null}
           </span>
         </span>

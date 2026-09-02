@@ -1,16 +1,20 @@
 "use client";
 
 import { normalizeName } from "@/lib/normalize";
+import { isCategory } from "@/lib/categories";
+import { formatProductName } from "@/lib/products/format";
 
 import { useCallback, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import type { ListItem } from "@/lib/database.types";
+import type { ListItem, ProductSuggestion } from "@/lib/database.types";
 import { useListItems, upsertItem, TEMP_ID_PREFIX } from "@/lib/hooks/use-list-items";
 import { AppHeader } from "@/components/app-header";
 import { TabBar } from "@/components/nav/tab-bar";
 import { AddItemBar } from "./add-item-bar";
 import { ItemRow } from "./item-row";
 import { ChevronIcon } from "./icons";
+
+type NewItemFields = Pick<ListItem, "name" | "quantity" | "gtin" | "product_id" | "category">;
 
 type ShoppingListProps = {
   listId: string;
@@ -42,15 +46,55 @@ export function ShoppingList({ listId, listName, householdName, currentUserId, m
     window.setTimeout(() => setError(null), 4000);
   }, []);
 
-  const handleAdd = useCallback(
-    async (name: string, quantity: number) => {
+  /** Aplica uma categoria ao item em estado local (se ainda existir) e no banco. Nunca lança. */
+  const applyCategory = useCallback(
+    async (itemId: string, category: string) => {
+      setItems((prev) => {
+        const current = prev.find((i) => i.id === itemId);
+        return current && current.category !== category ? upsertItem(prev, { ...current, category }) : prev;
+      });
+      try {
+        await supabase.from("list_items").update({ category }).eq("id", itemId);
+      } catch {
+        // Silencioso: a categoria é auxiliar; a rota já tenta gravar no banco também.
+      }
+    },
+    [supabase, setItems],
+  );
+
+  /** Pede a categoria ao servidor em background (texto livre). Nunca bloqueia nem lança. */
+  const categorizeInBackground = useCallback(
+    (itemId: string, name: string) => {
+      void (async () => {
+        try {
+          const res = await fetch("/api/itens/categorizar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ nomes: [name] }),
+          });
+          if (!res.ok) return;
+          const json = (await res.json()) as { ok?: boolean; categorias?: Record<string, string> };
+          const category = json.ok ? json.categorias?.[name] : undefined;
+          if (isCategory(category)) await applyCategory(itemId, category);
+        } catch {
+          // Sem categoria: o item fica em "Outros" no modo Compras.
+        }
+      })();
+    },
+    [applyCategory],
+  );
+
+  /**
+   * Inserção otimista compartilhada por texto livre e sugestão. O item aparece na hora; `beforeInsert` (opcional)
+   * resolve campos extras (ex.: product_id) antes de gravar. Devolve a linha criada ou null.
+   */
+  const insertItem = useCallback(
+    async (fields: NewItemFields, beforeInsert?: () => Promise<Partial<NewItemFields>>): Promise<ListItem | null> => {
       const now = new Date().toISOString();
       const tempId = `${TEMP_ID_PREFIX}${crypto.randomUUID()}`;
       const optimistic: ListItem = {
         id: tempId,
         list_id: listId,
-        name,
-        quantity,
         unit: null,
         note: null,
         checked: false,
@@ -59,28 +103,81 @@ export function ShoppingList({ listId, listName, householdName, currentUserId, m
         added_by: currentUserId,
         created_at: now,
         updated_at: now,
-        product_id: null,
-        gtin: null,
-        normalized_name: normalizeName(name),
-        category: null,
+        normalized_name: normalizeName(fields.name),
+        ...fields,
       };
       setItems((prev) => [...prev, optimistic]);
 
+      let extra: Partial<NewItemFields> = {};
+      if (beforeInsert) {
+        try {
+          extra = await beforeInsert();
+        } catch {
+          extra = {};
+        }
+      }
+
       const { data, error } = await supabase
         .from("list_items")
-        .insert({ list_id: listId, name, quantity })
+        .insert({ list_id: listId, ...fields, ...extra })
         .select()
         .single();
 
       if (error || !data) {
         setItems((prev) => prev.filter((i) => i.id !== tempId));
         fail("Não foi possível adicionar. Tente de novo.");
-        return;
+        return null;
       }
       // Troca o temporário pelo real (o evento realtime pode já ter chegado; upsert evita duplicar).
       setItems((prev) => upsertItem(prev.filter((i) => i.id !== tempId), data));
+      return data;
     },
     [listId, currentUserId, supabase, setItems, fail],
+  );
+
+  const handleAdd = useCallback(
+    async (name: string, quantity: number) => {
+      const data = await insertItem({ name, quantity, gtin: null, product_id: null, category: null });
+      if (data) categorizeInBackground(data.id, name);
+    },
+    [insertItem, categorizeInBackground],
+  );
+
+  /** Garante o produto em `products` (por gtin) e devolve `{ id, category }`; null se não deu (RLS, rede). */
+  const ensureProduct = useCallback(
+    async (s: ProductSuggestion): Promise<{ id: string; category: string | null } | null> => {
+      try {
+        const found = await supabase.from("products").select("id, category").eq("gtin", s.gtin).maybeSingle();
+        if (found.data) return found.data;
+        const inserted = await supabase
+          .from("products")
+          .insert({ gtin: s.gtin, name: s.descricao, category: s.categoria })
+          .select("id, category")
+          .single();
+        if (inserted.data) return inserted.data;
+        // Corrida (outro celular criou antes) ou RLS: tenta ler de novo.
+        const again = await supabase.from("products").select("id, category").eq("gtin", s.gtin).maybeSingle();
+        return again.data ?? null;
+      } catch {
+        return null;
+      }
+    },
+    [supabase],
+  );
+
+  const handlePick = useCallback(
+    async (s: ProductSuggestion, quantity: number) => {
+      const name = formatProductName(s.descricao) || s.descricao;
+      const data = await insertItem(
+        { name, quantity, gtin: s.gtin, product_id: null, category: s.categoria },
+        async () => {
+          const product = await ensureProduct(s);
+          return { product_id: product?.id ?? null, category: s.categoria ?? product?.category ?? null };
+        },
+      );
+      if (data && !data.category) categorizeInBackground(data.id, name);
+    },
+    [ensureProduct, insertItem, categorizeInBackground],
   );
 
   const handleToggle = useCallback(
@@ -212,7 +309,7 @@ export function ShoppingList({ listId, listName, householdName, currentUserId, m
         ) : null}
       </main>
 
-      <AddItemBar onAdd={handleAdd} />
+      <AddItemBar onAdd={handleAdd} onPick={handlePick} />
       <TabBar />
     </>
   );

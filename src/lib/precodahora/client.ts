@@ -67,13 +67,17 @@ type RawEstabelecimento = {
   distancia?: number | string | null;
 };
 type RawRecord = { produto?: RawProduto | null; estabelecimento?: RawEstabelecimento | null };
-type RawResponse = {
+type RawResponse<T = RawRecord> = {
   codigo?: number;
   descricao?: string;
   totalPaginas?: number;
   totalRegistros?: number;
-  resultado?: RawRecord[] | null;
+  resultado?: T[] | null;
 };
+/** Registro bruto do /sugestao/ (autocomplete do site): `{ gtin: number, descricao: string, foto: string }`. */
+type RawSugestao = { gtin?: string | number | null; descricao?: string | null; foto?: string | null };
+
+export type PdhSuggestion = { gtin: string; descricao: string };
 
 type Session = { cookie: string; csrf: string; createdAt: number };
 
@@ -166,8 +170,13 @@ function buildForm(params: SearchParams, pagina: number): URLSearchParams {
   });
 }
 
-async function postProdutos(session: Session, body: URLSearchParams): Promise<RawResponse> {
-  const res = await fetchWithTimeout(`${BASE_URL}/produtos/`, {
+/** POST em um endpoint XHR do site (`/produtos/` ou `/sugestao/`), com a mesma sessão/CSRF e detecção de bloqueio. */
+async function postProdutos<T = RawRecord>(
+  session: Session,
+  body: URLSearchParams,
+  path: "/produtos/" | "/sugestao/" = "/produtos/",
+): Promise<RawResponse<T>> {
+  const res = await fetchWithTimeout(`${BASE_URL}${path}`, {
     method: "POST",
     headers: {
       "User-Agent": USER_AGENT,
@@ -195,9 +204,9 @@ async function postProdutos(session: Session, body: URLSearchParams): Promise<Ra
     // Página HTML no lugar de JSON = challenge servido inline.
     throw new PdhError("challenge", `Preço da Hora devolveu HTML em vez de JSON (status ${res.status})`, res.status);
   }
-  let json: RawResponse;
+  let json: RawResponse<T>;
   try {
-    json = JSON.parse(text) as RawResponse;
+    json = JSON.parse(text) as RawResponse<T>;
   } catch {
     throw new PdhError("invalid_response", "Resposta do Preço da Hora não é JSON válido", res.status);
   }
@@ -222,15 +231,18 @@ async function postProdutos(session: Session, body: URLSearchParams): Promise<Ra
 }
 
 /** POST com uma renovação de sessão em caso de 401/codigo 70. */
-async function postWithRetry(body: URLSearchParams): Promise<RawResponse> {
+async function postWithRetry<T = RawRecord>(
+  body: URLSearchParams,
+  path: "/produtos/" | "/sugestao/" = "/produtos/",
+): Promise<RawResponse<T>> {
   const session = await getSession();
   try {
-    return await postProdutos(session, body);
+    return await postProdutos<T>(session, body, path);
   } catch (err) {
     if (err instanceof PdhError && err.kind === "unauthorized") {
       cachedSession = null;
       const fresh = await getSession(true);
-      return postProdutos(fresh, body);
+      return postProdutos<T>(fresh, body, path);
     }
     throw err;
   }
@@ -348,6 +360,31 @@ export async function searchPrecoDaHora(params: SearchParams): Promise<PdhResult
     }
     if (rows.length < PAGE_SIZE) break;
     pagina++;
+  }
+  return out;
+}
+
+/**
+ * Autocomplete do site: `POST /sugestao/` (form `item=<termo>`) → produtos reais com código de barras vendidos na Bahia.
+ * Resposta observada (02/09/2026, "oleo de coco"):
+ *   `{ codigo: 80, dataConsulta, resultado: [{ gtin: number, descricao: string, foto: string }], totalRegistros, tempoResposta }`.
+ * `gtin` vem como número: convertido com `String(n)`; só aceitamos 8–14 dígitos (os demais são descartados).
+ * Mesmo limite de bloqueio do `/produtos/` (~20 POSTs / 15 min por IP) — cachear por termo (product_suggestions).
+ */
+export async function suggestPrecoDaHora(termo: string): Promise<PdhSuggestion[]> {
+  const item = termo.replace(/\s+/g, " ").trim();
+  if (!item) throw new PdhError("bad_request", "Informe `termo`");
+  const json = await postWithRetry<RawSugestao>(new URLSearchParams({ item }), "/sugestao/");
+  const rows = Array.isArray(json.resultado) ? json.resultado : [];
+  const seen = new Set<string>();
+  const out: PdhSuggestion[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const gtin = typeof row.gtin === "number" ? String(row.gtin) : digits(row.gtin);
+    const descricao = cleanText(row.descricao);
+    if (!/^\d{8,14}$/.test(gtin) || !/[1-9]/.test(gtin) || !descricao || seen.has(gtin)) continue;
+    seen.add(gtin);
+    out.push({ gtin, descricao });
   }
   return out;
 }
