@@ -1,7 +1,8 @@
-// Tipos do banco. Mantidos à mão e espelhando supabase/migrations/0001_init.sql.
-// Quando o schema mudar, atualizar aqui (ou gerar via `supabase gen types`).
+// Tipos do banco. Mantidos à mão e espelhando supabase/migrations/*.sql.
 
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
+
+export type PriceSource = "nfce" | "precodahora" | "encarte" | "manual";
 
 export type Database = {
   public: {
@@ -13,9 +14,36 @@ export type Database = {
         Relationships: [];
       };
       households: {
-        Row: { id: string; name: string; invite_code: string; created_by: string; created_at: string };
-        Insert: { id?: string; name: string; invite_code?: string; created_by?: string; created_at?: string };
-        Update: { id?: string; name?: string; invite_code?: string; created_by?: string; created_at?: string };
+        Row: {
+          id: string;
+          name: string;
+          invite_code: string;
+          created_by: string;
+          created_at: string;
+          lat: number | null;
+          lng: number | null;
+          address: string | null;
+        };
+        Insert: {
+          id?: string;
+          name: string;
+          invite_code?: string;
+          created_by?: string;
+          created_at?: string;
+          lat?: number | null;
+          lng?: number | null;
+          address?: string | null;
+        };
+        Update: {
+          id?: string;
+          name?: string;
+          invite_code?: string;
+          created_by?: string;
+          created_at?: string;
+          lat?: number | null;
+          lng?: number | null;
+          address?: string | null;
+        };
         Relationships: [];
       };
       household_members: {
@@ -44,6 +72,9 @@ export type Database = {
           added_by: string;
           created_at: string;
           updated_at: string;
+          product_id: string | null;
+          gtin: string | null;
+          normalized_name: string;
         };
         Insert: {
           id?: string;
@@ -58,6 +89,8 @@ export type Database = {
           added_by?: string;
           created_at?: string;
           updated_at?: string;
+          product_id?: string | null;
+          gtin?: string | null;
         };
         Update: {
           id?: string;
@@ -72,6 +105,181 @@ export type Database = {
           added_by?: string;
           created_at?: string;
           updated_at?: string;
+          product_id?: string | null;
+          gtin?: string | null;
+        };
+        Relationships: [];
+      };
+      stores: {
+        Row: {
+          id: string;
+          cnpj: string | null;
+          name: string;
+          address: string | null;
+          city: string | null;
+          lat: number | null;
+          lng: number | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          cnpj?: string | null;
+          name: string;
+          address?: string | null;
+          city?: string | null;
+          lat?: number | null;
+          lng?: number | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          cnpj?: string | null;
+          name?: string;
+          address?: string | null;
+          city?: string | null;
+          lat?: number | null;
+          lng?: number | null;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
+      products: {
+        Row: {
+          id: string;
+          gtin: string | null;
+          name: string;
+          normalized_name: string;
+          brand: string | null;
+          created_at: string;
+        };
+        Insert: { id?: string; gtin?: string | null; name: string; brand?: string | null; created_at?: string };
+        Update: { id?: string; gtin?: string | null; name?: string; brand?: string | null; created_at?: string };
+        Relationships: [];
+      };
+      receipts: {
+        Row: {
+          id: string;
+          household_id: string;
+          store_id: string;
+          access_key: string;
+          issued_at: string | null;
+          total: number | null;
+          item_count: number | null;
+          source_url: string | null;
+          created_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          household_id: string;
+          store_id: string;
+          access_key: string;
+          issued_at?: string | null;
+          total?: number | null;
+          item_count?: number | null;
+          source_url?: string | null;
+          created_by?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          household_id?: string;
+          store_id?: string;
+          access_key?: string;
+          issued_at?: string | null;
+          total?: number | null;
+          item_count?: number | null;
+          source_url?: string | null;
+          created_by?: string | null;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
+      receipt_items: {
+        Row: {
+          id: string;
+          receipt_id: string;
+          product_id: string | null;
+          description: string;
+          gtin: string | null;
+          quantity: number;
+          unit: string | null;
+          unit_price: number;
+          total: number;
+          position: number;
+        };
+        Insert: {
+          id?: string;
+          receipt_id: string;
+          product_id?: string | null;
+          description: string;
+          gtin?: string | null;
+          quantity?: number;
+          unit?: string | null;
+          unit_price: number;
+          total: number;
+          position?: number;
+        };
+        Update: {
+          id?: string;
+          receipt_id?: string;
+          product_id?: string | null;
+          description?: string;
+          gtin?: string | null;
+          quantity?: number;
+          unit?: string | null;
+          unit_price?: number;
+          total?: number;
+          position?: number;
+        };
+        Relationships: [];
+      };
+      price_observations: {
+        Row: {
+          id: string;
+          household_id: string;
+          store_id: string;
+          product_id: string | null;
+          receipt_item_id: string | null;
+          gtin: string | null;
+          description: string;
+          normalized_name: string;
+          price: number;
+          unit: string | null;
+          observed_at: string;
+          valid_until: string | null;
+          source: PriceSource;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          household_id: string;
+          store_id: string;
+          product_id?: string | null;
+          receipt_item_id?: string | null;
+          gtin?: string | null;
+          description: string;
+          price: number;
+          unit?: string | null;
+          observed_at: string;
+          valid_until?: string | null;
+          source: PriceSource;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          household_id?: string;
+          store_id?: string;
+          product_id?: string | null;
+          receipt_item_id?: string | null;
+          gtin?: string | null;
+          description?: string;
+          price?: number;
+          unit?: string | null;
+          observed_at?: string;
+          valid_until?: string | null;
+          source?: PriceSource;
+          created_at?: string;
         };
         Relationships: [];
       };
@@ -81,6 +289,25 @@ export type Database = {
       is_household_member: { Args: { hid: string }; Returns: boolean };
       create_household: { Args: { p_name: string }; Returns: string };
       join_household: { Args: { p_code: string }; Returns: string };
+      normalize_name: { Args: { "": string }; Returns: string };
+      best_prices: {
+        Args: { p_list_id: string; p_max_age_hours?: number };
+        Returns: {
+          list_item_id: string;
+          item_name: string;
+          store_id: string;
+          store_name: string;
+          store_lat: number | null;
+          store_lng: number | null;
+          price: number;
+          description: string;
+          gtin: string | null;
+          observed_at: string;
+          source: PriceSource;
+          match_kind: "gtin" | "product" | "name";
+          score: number;
+        }[];
+      };
     };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
@@ -92,3 +319,27 @@ export type ListItem = Tables<"list_items">;
 export type Household = Tables<"households">;
 export type List = Tables<"lists">;
 export type Profile = Tables<"profiles">;
+export type Store = Tables<"stores">;
+export type Product = Tables<"products">;
+export type Receipt = Tables<"receipts">;
+export type ReceiptItem = Tables<"receipt_items">;
+export type PriceObservation = Tables<"price_observations">;
+export type BestPriceRow = Database["public"]["Functions"]["best_prices"]["Returns"][number];
+
+/** Formato de resultado do Preço da Hora (contrato de /api/precos/buscar). */
+export type PdhResult = {
+  descricao: string;
+  gtin: string | null;
+  preco: number;
+  unidade: string | null;
+  data: string;
+  loja: {
+    nome: string;
+    cnpj: string | null;
+    endereco: string | null;
+    cidade: string | null;
+    lat: number | null;
+    lng: number | null;
+    distanciaKm: number | null;
+  };
+};
