@@ -48,7 +48,7 @@ test("isValidGtin", () => {
 
 test("parseNfceHtml lê o DANFE sintético real da Sefaz-BA", () => {
   const r = parseNfceHtml(fixture("danfe-ba-sintetico.html"));
-  assert.equal(r.accessKey, "29250711322064001288650010002427581003355486");
+  assert.equal(r.accessKey, "00000000000000000000000000000000000000000000");
   assert.equal(r.store.cnpj, "11322064001288");
   assert.equal(r.store.name, "SOBRAL & FILHOS COMERCIO DE COMBUSTIVEIS LTDA -POSTO SAO");
   assert.equal(r.store.address, "AV GENERAL GRACA LESSA, 305, ENGENHO VELHO DE BROTAS, SALVADOR, BA");
@@ -92,10 +92,10 @@ test("parseNfceHtml: vários itens, desconto e código GTIN", () => {
   <div id="linhaTotal" class="linhaShade"><label>Valor a pagar R$:</label><span class="totalNumb txtMax">1.575,48</span></div>
 </div>
 <li><strong>Número: </strong>179850<strong> Série: </strong>1<strong> Emissão: </strong>01/10/2023 23:00:15-03:00  - Via Consumidor</li>
-<span class="chave">2923 1022 8394 2600 0176 6500 1000 1798 5010 9199 7189</span>
+<span class="chave">1111 1111 1111 1111 1111 1111 1111 1111 1111 1111 1111</span>
 </span>`;
   const r = parseNfceHtml(html);
-  assert.equal(r.accessKey, "29231022839426000176650010001798501091997189");
+  assert.equal(r.accessKey, "11111111111111111111111111111111111111111111");
   assert.equal(r.store.name, "MERCADO & CIA LTDA");
   assert.equal(r.store.city, "SALVADOR");
   assert.equal(r.total, 1575.48);

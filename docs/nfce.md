@@ -1,7 +1,7 @@
 # NFC-e Bahia — importação de cupons
 
-Pesquisa feita em 01/09/2026 com `curl` contra o portal real e validada com um cupom real
-(chave `2925 0711 3220 6400 1288 6500 1000 2427 5810 0335 5486`, publicado na cota parlamentar da Câmara).
+Pesquisa feita em 01/09/2026 com `curl` contra o portal real e validada com fixtures
+sintéticas. Nenhuma chave de acesso real é mantida neste repositório.
 
 ## URLs
 
@@ -27,7 +27,7 @@ Outras constatações:
 - `https://nfe.sefaz.ba.gov.br` responde, mas a cadeia de certificados é incompleta: Node (`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`) e curl falham. O QR code usa `http://` e o app força `http`.
 - Sem captcha no caminho do QR code. Sem rate limit percebido nos testes.
 - Só o host `nfe.sefaz.ba.gov.br` e o path `/servicos/nfce/qrcode.aspx` são aceitos (proteção contra SSRF).
-- Não há chave de acesso pública de teste; a validação usou o cupom real acima (posto de gasolina, 1 item, sem GTIN).
+- As fixtures de validação usam dados sintéticos; nenhuma chave de acesso real é necessária para os testes.
 
 ## Estrutura do HTML (DANFE sintético)
 
@@ -60,7 +60,7 @@ Layout "nfceMob" gerado por XSLT (`arquivos_xslt/nfceMob.css`). O conteúdo apar
 </div>
 <div id="infos">
   <li><strong>Número: </strong>242758<strong> Série: </strong>1<strong> Emissão: </strong>24/07/2025 18:18:27-03:00 - Via Consumidor …</li>
-  <li>… <strong>Chave de acesso:</strong><br><span class="chave">2925 0711 3220 … 5486</span></li>
+  <li>… <strong>Chave de acesso:</strong><br><span class="chave">CHAVE-FICTICIA</span></li>
   <li><strong>CPF: </strong>…</li>                                  <!-- consumidor; não é armazenado -->
 </div>
 ```
